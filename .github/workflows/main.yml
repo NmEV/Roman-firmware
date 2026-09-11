@@ -59,6 +59,15 @@ jobs:
               -DPICO_TOOLCHAIN_PATH=${{ env.PICO_TOOLCHAIN_PATH }} \
               ..
         make -j$(nproc)
+    # 6b) 断言 pico_config.h 真的被注入到生成的配置头里：4 KB 栈与单核 flash
+    # 设置都靠它生效，静默失效会变成上板后死机，而不是构建失败
+    - name: Verify SDK config injection
+      run: |
+        HDR=build/generated/pico_base/pico/config_autogen.h
+        test -f "$HDR" || { echo "::error::$HDR was not generated"; exit 1; }
+        grep -q 'pico_config.h' "$HDR" || {
+          echo "::error::pico_config.h was NOT injected - PICO_STACK_SIZE and PICO_FLASH_ASSUME_CORE1_SAFE would silently not apply"; exit 1; }
+        echo "pico_config.h is injected into config_autogen.h"
     # 7️⃣ 上传固件制品
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4

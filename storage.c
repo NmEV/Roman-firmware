@@ -24,13 +24,24 @@
 // can simply be provisioned again instead of being locked out with a corrupt
 // record.
 
+#include <stdio.h>
 #include <string.h>
 
 #include "hardware/flash.h"
 #include "pico/flash.h"
-#include "pico/rand.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
+#include "pico/unique_id.h"
 
+#if PICO_RP2350
+#include "hardware/structs/trng.h"
+#include "pico/bootrom.h"
+#define STORAGE_HAS_TRNG 1
+#else
+#define STORAGE_HAS_TRNG 0
+#endif
+
+#include "diag.h"
 #include "storage.h"
 #include "tweetnacl.h"
 
@@ -64,17 +75,126 @@ _Static_assert(STORAGE_TOTAL_BYTES <= FLASH_SECTOR_SIZE,
 _Static_assert((STORAGE_FLASH_OFFSET % FLASH_SECTOR_SIZE) == 0,
                "the record must start on a sector boundary");
 
+// ---------------------------------------------------------------------------
+// randomness
+// ---------------------------------------------------------------------------
+//
+// tweetnacl.c expects the application to provide randombytes(); Roman needs it
+// for the fresh X25519 key pair and the fresh nonce of every write.
+//
+// pico_rand's get_rand_32() is deliberately NOT used here: it waits for the
+// hardware TRNG with an unbounded "while (trng_hw->trng_busy);" inside a spin
+// lock with interrupts disabled. A TRNG that never answered would hang the whole
+// firmware from inside an HTTP handler - on this board that means unplugging it.
+// The same peripheral sequence is used below, but every wait has a deadline; if
+// the TRNG does not answer, a TRNG-seeded software generator keeps the device
+// usable instead of blocking it (see the entropy note in README.md).
+
+#define STORAGE_TRNG_TIMEOUT_US 10000u
+
+static uint64_t rand_state;
+static bool rand_seeded;
+static bool rand_trng_seen; // set once a hardware sample has been mixed in
+
+// splitmix64 finaliser: mixes one input word thoroughly.
+static uint64_t mix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+static uint32_t splitmix32(void) {
+    return (uint32_t)(mix64(rand_state += 0x9E3779B97F4A7C15ull) >> 32);
+}
+
+#if STORAGE_HAS_TRNG
+// The sequence pico_rand uses to stream raw TRNG ROSC samples, with the
+// unbounded busy wait replaced by a deadline.
+static bool trng_sample(uint32_t *w0, uint32_t *w1) {
+    trng_hw->sample_cnt1 = 0;
+    trng_hw->trng_debug_control = 0xFFFFFFFFu; // raw samples, no decorrelators
+    trng_hw->rnd_source_enable = 0xFFFFFFFFu;  // start the ROSC if it is idle
+    trng_hw->rng_icr = 0xFFFFFFFFu;            // clear EHR_VALID and the rest
+
+    absolute_time_t deadline = make_timeout_time_us(STORAGE_TRNG_TIMEOUT_US);
+    while (trng_hw->trng_busy) {
+        if (time_reached(deadline)) {
+            return false; // bounded: never spin forever on the entropy source
+        }
+    }
+    *w0 = trng_hw->ehr_data[0];
+    *w1 = trng_hw->ehr_data[1];
+    return true;
+}
+#endif
+
+static void rand_seed(void) {
+    if (rand_seeded) {
+        return;
+    }
+    uint64_t seed = 0x524F4D414Eull; // "ROMAN"
+
+#if STORAGE_HAS_TRNG
+    // The bootrom fills this from the TRNG once per boot.
+    uint32_t boot_random[4] = {0, 0, 0, 0};
+    if (rom_get_boot_random(boot_random)) {
+        seed ^= mix64(((uint64_t)boot_random[1] << 32) | boot_random[0]);
+        seed ^= mix64(((uint64_t)boot_random[3] << 32) | boot_random[2]);
+    }
+#endif
+
+    pico_unique_board_id_t board_id;
+    pico_get_unique_board_id(&board_id);
+    uint64_t id = 0;
+    for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; ++i) {
+        id = (id << 8) | board_id.id[i];
+    }
+    seed ^= mix64(id);
+    seed ^= mix64(time_us_64());
+
+    rand_state = seed ? seed : 0x9E3779B97F4A7C15ull;
+    rand_seeded = true;
+}
+
+static uint32_t rand_next(void) {
+    rand_seed();
+#if STORAGE_HAS_TRNG
+    uint32_t w0, w1;
+    if (trng_sample(&w0, &w1)) {
+        // Fold the fresh sample into the state, like pico_rand does, rather than
+        // handing out raw (biased) ROSC words.
+        rand_trng_seen = true;
+        rand_state ^= mix64(((uint64_t)w1 << 32) | w0);
+    }
+#endif
+    return splitmix32();
+}
+
+bool storage_trng_probe(void) {
+    rand_seed();
+#if STORAGE_HAS_TRNG
+    uint32_t w0, w1;
+    if (trng_sample(&w0, &w1)) {
+        rand_trng_seen = true;
+        rand_state ^= mix64(((uint64_t)w1 << 32) | w0);
+        return true;
+    }
+#endif
+    return false;
+}
+
 // tweetnacl.c expects this to be provided by the application; it is the only
 // definition in the firmware (the crypto_box key pair depends on it).
 void randombytes(unsigned char *out, unsigned long long outlen) {
     while (outlen >= sizeof(uint32_t)) {
-        uint32_t r = get_rand_32();
+        uint32_t r = rand_next();
         memcpy(out, &r, sizeof(r));
         out += sizeof(r);
         outlen -= sizeof(r);
     }
     if (outlen) {
-        uint32_t r = get_rand_32();
+        uint32_t r = rand_next();
         memcpy(out, &r, (size_t)outlen);
     }
 }
@@ -163,7 +283,10 @@ size_t storage_read(uint8_t *dst, size_t cap) {
         uint8_t sec_nonce[STORAGE_NONCE_LEN];
         storage_section_nonce(nonce, i, sec_nonce);
 
-        uint8_t box[32 + STORAGE_SECTION_SIZE];
+        // Static, not on the stack: this is the deepest call chain in the
+        // firmware and the server is single threaded.
+        static uint8_t box_read[32 + STORAGE_SECTION_SIZE];
+        uint8_t *box = box_read;
         memset(box, 0, 32);
         memcpy(box + 16, storage_flash + pos, STORAGE_BOX_OVERHEAD);
         memcpy(box + 32, storage_flash + pos + STORAGE_BOX_OVERHEAD, chunk);
@@ -185,12 +308,16 @@ bool storage_write(const uint8_t *src, size_t len) {
     }
 
     // Fresh key pair and fresh nonce for this write.
+    diag_stage(DIAG_STAGE_ENTROPY);
+    printf("storage: x25519 keypair (entropy)\n");
     uint8_t pk[STORAGE_KEY_LEN_LOCAL], sk[STORAGE_KEY_LEN_LOCAL];
     if (crypto_box_keypair(pk, sk) != 0) {
         return false;
     }
     uint8_t nonce[STORAGE_NONCE_LEN];
     randombytes(nonce, STORAGE_NONCE_LEN);
+    diag_stage(DIAG_STAGE_BOXING);
+    printf("storage: boxing %u bytes\n", (unsigned)len);
 
     // Stage the whole programmed region; the erased (0xFF) fill is what an
     // untouched part of the sector looks like.
@@ -214,7 +341,8 @@ bool storage_write(const uint8_t *src, size_t len) {
         uint8_t sec_nonce[STORAGE_NONCE_LEN];
         storage_section_nonce(nonce, i, sec_nonce);
 
-        uint8_t box[32 + STORAGE_SECTION_SIZE];
+        static uint8_t box_write[32 + STORAGE_SECTION_SIZE];
+        uint8_t *box = box_write;
         memset(box, 0, 32);
         memcpy(box + 32, src + off, chunk);
         if (crypto_box(box, box, 32 + chunk, sec_nonce, pk, sk) != 0) {
@@ -227,12 +355,18 @@ bool storage_write(const uint8_t *src, size_t len) {
     // The marker goes in last (highest address): see the layout comment above.
     memcpy(storage_buf + STORAGE_MARKER_OFF, STORAGE_MARKER, STORAGE_MARKER_LEN);
 
+    diag_stage(DIAG_STAGE_ERASE);
+    printf("storage: erasing sector\n");
     int rc = flash_safe_execute(storage_erase_cb, NULL, UINT32_MAX);
     if (rc != PICO_OK) {
+        printf("storage: erase failed rc=%d\n", rc);
         return false;
     }
+    diag_stage(DIAG_STAGE_PROGRAM);
+    printf("storage: programming %u bytes\n", (unsigned)STORAGE_TOTAL_BYTES);
     uintptr_t params[2] = {STORAGE_TOTAL_BYTES, (uintptr_t)storage_buf};
     rc = flash_safe_execute(storage_program_cb, params, UINT32_MAX);
+    printf("storage: program rc=%d\n", rc);
     return rc == PICO_OK;
 }
 

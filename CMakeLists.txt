@@ -44,6 +44,7 @@ pico_sdk_init()
 
 add_executable(roman
     main.c
+    diag.c
     http_server.c
     keystore.c
     record.c

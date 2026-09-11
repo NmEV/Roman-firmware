@@ -154,6 +154,44 @@ erase part of the program, so the build fails instead.
 * `/sign` accepts any `challenge`/`context`/`timestamp` string; the timestamp is
   echoed back, not validated.
 
+## Troubleshooting
+
+Provisioning (`POST /write`) is the only path that runs the deep crypto chain
+and the flash erase, so it carries extra instrumentation:
+
+* **Hardware watchdog** (3 s, armed in `main.c`): if anything in a handler
+  stalls, the board reboots itself instead of staying dead until it is unplugged.
+  `POST /debug` then reports `reset_by_watchdog: true`.
+* **Stage markers** (`diag.c`): every step of provisioning is written to a
+  watchdog scratch register, which survives a watchdog reset but not a power
+  cycle. The next boot logs `last_stage=...` and the snapshot carries
+  `roman.last_stage`, so a hang is localised **without** a UART adapter. Stages:
+  `write-received`, `fields-ok`, `pair-check`, `pair-ok`, `entropy`,
+  `boxing`, `erase`, `program`, `done`.
+* **Boot log** (UART, 115200): stack size, SDK version, reset cause, entropy
+  source and storage state.
+* **Panic output**: a stack guard violation (UsageFault) makes the SDK print
+  `PANIC` plus a file and line on that same UART - the difference between a
+  fault and a silent stall.
+
+If `/write` times out: wait 3 s for the watchdog (or replug), read
+`roman.last_stage`, and compare it with the boot log. Provisioning leaves the
+sector empty when it does not complete, so the board can simply be provisioned
+again - `writen` is only set once the whole record has been programmed.
+
+## Entropy note
+
+`randombytes()` deliberately does not use pico_rand's `get_rand_32()`: that
+waits for the hardware TRNG with an unbounded `while (trng_hw->trng_busy);`
+inside a spin lock with interrupts disabled, so a TRNG that never answered would
+hang the firmware from inside a request. Roman drives the same peripheral with a
+10 ms deadline and falls back to a splitmix64 generator seeded from the bootrom's
+TRNG random (`rom_get_boot_random`, 128 bits per boot) plus the board id and the
+microsecond timer. The primary path is still the live hardware TRNG; only if it
+does not answer does the key material lose per-call fresh entropy - and since the
+X25519 private key is stored next to the ciphertext anyway (see the security
+model), that does not change the practical threat model.
+
 ## Build
 
 VS Code with the Raspberry Pi Pico extension works as-is (the `.vscode` files

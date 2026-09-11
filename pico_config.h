@@ -33,4 +33,13 @@
 #define PICO_USE_STACK_GUARDS 1
 #endif
 
+// Roman never starts core 1, so flash_safe_execute() must not try to synchronise
+// with it. With this set the SDK takes its documented "no use of core 1" path
+// (disable interrupts on core 0 and call the callback) instead of entering the
+// multicore lockout handshake - which is both pointless here and a hang risk if
+// some library ever pulls pico_multicore into the link.
+#ifndef PICO_FLASH_ASSUME_CORE1_SAFE
+#define PICO_FLASH_ASSUME_CORE1_SAFE 1
+#endif
+
 #endif // ROMAN_PICO_CONFIG_H

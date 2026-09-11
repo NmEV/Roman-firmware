@@ -15,6 +15,7 @@
 #include <pico/stdlib.h>
 #include <stdio.h>
 
+#include "diag.h"
 #include "http_server.h"
 #include "keystore.h"
 #include "led.h"
@@ -22,13 +23,20 @@
 #include "storage.h"
 #include "tweetnacl.h"
 
+#include "hardware/watchdog.h"
+#include "pico/version.h"
+
 #if DEBUG_AVAILABLE
 #include "hardware/clocks.h"
-#include "hardware/watchdog.h"
 #include "pico/time.h"
 #include "pico/unique_id.h"
-#include "pico/version.h"
 #endif
+
+// Core 0 stack bounds, provided by the default linker script
+// (pico_standard_link/script_include/section_end.incl). Reported at boot and by
+// POST /debug.
+extern uint32_t __StackTop;
+extern uint32_t __StackBottom;
 
 #define HTTP_PORT 80
 #define HTTP_MAX_CONN 3
@@ -244,7 +252,7 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
 
     // The signing key lives in flash; without a provisioned record there is
     // nothing this endpoint can do.
-    uint8_t sk[64];
+    static uint8_t sk[64];
     if (!keystore_signing_key(sk)) {
         WEB_STAT(sign_bad);
         http_send_response(pcb, st, 503,
@@ -252,7 +260,7 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
         return;
     }
 
-    char device_id[RECORD_MAX_DEVICE_ID + 1];
+    static char device_id[RECORD_MAX_DEVICE_ID + 1];
     if (!keystore_device_id(device_id, sizeof(device_id))) {
         memset(sk, 0, sizeof(sk));
         WEB_STAT(sign_bad);
@@ -260,7 +268,9 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
         return;
     }
 
-    char challenge[256], context[128], timestamp[128];
+    // Static, not on the stack: the signing path is the deepest call chain in
+    // the firmware and the server handles one request at a time.
+    static char challenge[256], context[128], timestamp[128];
     if (json_get_string(body, "challenge", challenge, sizeof(challenge)) != 0) {
         memset(sk, 0, sizeof(sk));
         WEB_STAT(sign_bad);
@@ -280,7 +290,7 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
         return;
     }
 
-    char sign_body[1024];
+    static char sign_body[1024];
     int msg_len = snprintf(sign_body, sizeof(sign_body), "%s:%s:%s:%s",
                            challenge, context, timestamp, device_id);
     if (msg_len < 0 || (size_t)msg_len >= sizeof(sign_body)) {
@@ -330,7 +340,7 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
         return;
     }
 
-    char pk_b64[64], sk_b64[128], device_id[RECORD_MAX_DEVICE_ID + 1];
+    static char pk_b64[64], sk_b64[128], device_id[RECORD_MAX_DEVICE_ID + 1];
     if (json_get_string(body, "pk", pk_b64, sizeof(pk_b64)) != 0) {
         WEB_STAT(write_bad);
         http_send_response(pcb, st, 400, "{\"error\":\"Missing field: pk\"}");
@@ -347,6 +357,8 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
         return;
     }
 
+    diag_stage(DIAG_STAGE_RECEIVED);
+    printf("http: /write received (%u byte body)\n", (unsigned)st->content_length);
     // keystore_provision() checks the stored flag before it parses anything, so
     // an already provisioned board never reaches the flash.
     switch (keystore_provision(pk_b64, sk_b64, device_id)) {
@@ -382,15 +394,15 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
 // ---------------------------------------------------------------------------
 
 static void handle_info(struct tcp_pcb *pcb, http_state_t *st) {
-    char device_id[RECORD_MAX_DEVICE_ID + 1];
-    char id_json[RECORD_MAX_DEVICE_ID + 8];
+    static char device_id[RECORD_MAX_DEVICE_ID + 1];
+    static char id_json[RECORD_MAX_DEVICE_ID + 8];
     if (keystore_device_id(device_id, sizeof(device_id))) {
         snprintf(id_json, sizeof(id_json), "\"%s\"", device_id);
     } else {
         snprintf(id_json, sizeof(id_json), "null");
     }
 
-    char info_buf[320];
+    static char info_buf[320];
     snprintf(info_buf, sizeof(info_buf),
              "{\"device\":\"pico2\",\"firmware\":\"roman\",\"version\":\"0.1\","
              "\"engine\":\"C/tweetnacl\",\"id\":%s,\"storage\":\"%s\"}",
@@ -402,11 +414,6 @@ static void handle_info(struct tcp_pcb *pcb, http_state_t *st) {
 // ---------------------------------------------------------------------------
 // POST /debug
 // ---------------------------------------------------------------------------
-
-// Core 0 stack bounds, provided by the default linker script
-// (pico_standard_link/script_include/section_end.incl).
-extern uint32_t __StackTop;
-extern uint32_t __StackBottom;
 
 // Must match STORAGE_FLASH_OFFSET in storage.c.
 #define DEBUG_STORAGE_FLASH_OFFSET (1024u * 1024u)
@@ -442,7 +449,7 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
         }
     }
 
-    char unique_id[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
+    static char unique_id[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
     pico_get_unique_board_id_string(unique_id, sizeof(unique_id));
 
     // netif_default is only NULL before usb_network_init() has run.
@@ -461,17 +468,18 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
     }
 
     // Roman specifics: the stored flag, the id and both public keys.
-    char ed_b64[64] = "";
-    char x_b64[64] = "";
-    uint8_t pk[32];
+    static char ed_b64[64], x_b64[64];
+    static uint8_t pk[32];
+    ed_b64[0] = '\0';
+    x_b64[0] = '\0';
     if (keystore_public_key(pk)) {
         base64_encode(pk, 32, ed_b64);
     }
     if (storage_x25519_pk(pk)) {
         base64_encode(pk, 32, x_b64);
     }
-    char device_id[RECORD_MAX_DEVICE_ID + 1];
-    char id_json[RECORD_MAX_DEVICE_ID + 8];
+    static char device_id[RECORD_MAX_DEVICE_ID + 1];
+    static char id_json[RECORD_MAX_DEVICE_ID + 8];
     if (keystore_device_id(device_id, sizeof(device_id))) {
         snprintf(id_json, sizeof(id_json), "\"%s\"", device_id);
     } else {
@@ -489,7 +497,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      "\"too_large\":%u,\"errors\":%u},"
                      "\"storage\":{\"writen\":%s,\"available\":%s,\"selftest\":\"%s\","
                      "\"plaintext_len\":%u,\"max_payload\":%d,\"flash_offset\":%u},"
-                     "\"roman\":{\"device_id\":%s,\"ed25519_pk\":\"%s\",\"x25519_pk\":\"%s\"}"
+                     "\"roman\":{\"device_id\":%s,\"ed25519_pk\":\"%s\",\"x25519_pk\":\"%s\","
+                     "\"last_stage\":\"%s\"}"
                      "}}",
                      (unsigned)to_ms_since_boot(get_absolute_time()),
                      PICO_SDK_VERSION_STRING,
@@ -507,7 +516,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      storage_writen() ? "true" : "false",
                      available ? "true" : "false", selftest, (unsigned)plaintext_len,
                      STORAGE_MAX_PAYLOAD, DEBUG_STORAGE_FLASH_OFFSET,
-                     id_json, ed_b64, x_b64);
+                     id_json, ed_b64, x_b64,
+                     diag_stage_name(diag_previous_stage()));
 
     if (n < 0 || (size_t)n >= sizeof(debug_json)) {
         WEB_STAT(errors);
@@ -568,8 +578,11 @@ static void handle_debug(struct tcp_pcb *pcb, http_state_t *st, const char *body
 // ---------------------------------------------------------------------------
 
 static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
-    char method[16] = {0};
-    char path[128] = {0};
+    // Static, not on the stack: every byte of margin counts on the deep crypto
+    // paths below (see the stack note in README.md).
+    static char method[16], path[128];
+    method[0] = '\0';
+    path[0] = '\0';
 
     char *sp1 = strchr(st->buf, ' ');
     if (!sp1) {
@@ -779,6 +792,14 @@ bool http_server_init(void) {
     if (storage_writen()) {
         printf("http: writen=1, POST /write will answer 403\n");
     }
+    // Boot diagnostics: the two numbers that decide whether the deep crypto
+    // paths have room, and which entropy path is in use.
+    printf("http: stack %u bytes, sdk %s, reset_by_watchdog=%d\n",
+           (unsigned)((uintptr_t)&__StackTop - (uintptr_t)&__StackBottom),
+           PICO_SDK_VERSION_STRING,
+           watchdog_caused_reboot() ? 1 : 0);
+    printf("http: entropy source: %s\n",
+           storage_trng_probe() ? "hardware TRNG" : "TRNG-seeded fallback");
 
     http_pcb = tcp_new();
     if (!http_pcb) {

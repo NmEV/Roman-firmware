@@ -221,6 +221,8 @@ SNAPSHOT_LAYOUT = (
     ("存储", "storage.plaintext_len", format_bytes, ("storage", "plaintext_len")),
     ("存储", "storage.max_payload", format_bytes, ("storage", "max_payload")),
     ("存储", "storage.flash_offset", format_offset, ("storage", "flash_offset")),
+    # 上次复位时配网卡在哪一步（看门狗 scratch 记录，无需 UART）
+    ("Roman", "roman.last_stage", str, ("roman", "last_stage")),
     ("Roman", "roman.device_id", str, ("roman", "device_id")),
     ("Roman", "roman.ed25519_pk", str, ("roman", "ed25519_pk")),
     ("Roman", "roman.x25519_pk", str, ("roman", "x25519_pk")),

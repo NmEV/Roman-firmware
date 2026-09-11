@@ -5,12 +5,14 @@
 // service everything from the main loop. 's' over UART shuts down cleanly.
 
 #include <hardware/uart.h>
+#include <hardware/watchdog.h>
 #include <lwip/apps/mdns.h>
 #include <lwip/ip.h>
 #include <pico/stdlib.h>
 #include <stdio.h>
 
 #include "dhcpserver/dhcpserver.h"
+#include "diag.h"
 #include "http_server.h"
 #include "led.h"
 #include "usb_network.h"
@@ -23,6 +25,15 @@ static const ip4_addr_t gateway = IPADDR4_INIT_BYTES(0, 0, 0, 0);
 int main() {
   stdio_uart_init();
   led_init();
+
+  // The HTTP handlers run the deepest crypto chain in the firmware. If anything
+  // in there ever stalls, this reboots the board instead of leaving it dead
+  // until it is unplugged; watchdog_caused_reboot() is reported by POST /debug
+  // and in the boot log. 3 s is far above the worst case flash erase (~0.4 s).
+  watchdog_enable(3000, true); // true: keep running while a debugger has us halted
+  printf("roman: boot (reset_by_watchdog=%d, last_stage=%s)\n",
+         watchdog_caused_reboot() ? 1 : 0, diag_stage_name(diag_previous_stage()));
+  diag_stage(DIAG_STAGE_IDLE); // this boot starts clean
 
   // setup USB network
   if (!usb_network_init(&ownip, &netmask, &gateway, true)) {
@@ -50,6 +61,7 @@ int main() {
   while ((key != 's') && (key != 'S')) {
     usb_network_update();
     led_tick();
+    watchdog_update();
     key = getchar_timeout_us(0); // get any pending key press but don't wait
   }
 

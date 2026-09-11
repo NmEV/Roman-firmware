@@ -39,4 +39,10 @@ bool storage_clear(void);
 // The stored (plaintext) X25519 public key, for POST /debug.
 bool storage_x25519_pk(uint8_t pk[STORAGE_KEY_LEN]);
 
+// Probes the hardware TRNG once, with a bounded wait. Returns true when it
+// answered. randombytes() degrades to a TRNG-seeded software generator when it
+// does not, so the firmware can never hang on its entropy source; this is used
+// to report which path is in use at boot.
+bool storage_trng_probe(void);
+
 #endif // ROMAN_STORAGE_H

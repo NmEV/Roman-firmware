@@ -1,7 +1,9 @@
 // See keystore.h.
 
+#include <stdio.h>
 #include <string.h>
 
+#include "diag.h"
 #include "keystore.h"
 #include "record.h"
 #include "storage.h"
@@ -83,13 +85,19 @@ keystore_status_t keystore_provision(const char *pk_b64, const char *sk_b64,
     if (pk_b64 == NULL || sk_b64 == NULL || !record_device_id_valid(device_id)) {
         return KEYSTORE_ERR_ARG;
     }
+    // Breadcrumbs: provisioning runs once per board and is the only path that
+    // touches the TRNG and flash, so it logs where it is (see README).
+    diag_stage(DIAG_STAGE_FIELDS_OK);
+    printf("keystore: fields accepted, device_id=%s\n", device_id);
 
-    uint8_t pk[32];
+    // Static, not on the stack: provisioning funnels into the deepest crypto
+    // chain in the firmware (see the stack note in README.md).
+    static uint8_t pk[32];
     if (record_b64_decode(pk_b64, pk, sizeof(pk)) != 32) {
         return KEYSTORE_ERR_ARG;
     }
 
-    uint8_t sk[64];
+    static uint8_t sk[64];
     int sk_len = record_b64_decode(sk_b64, sk, sizeof(sk));
     if (sk_len == 32) {
         memcpy(sk + 32, pk, 32); // a bare seed: the public half is appended
@@ -97,18 +105,26 @@ keystore_status_t keystore_provision(const char *pk_b64, const char *sk_b64,
         return KEYSTORE_ERR_ARG;
     }
 
+    diag_stage(DIAG_STAGE_PAIR_CHECK);
+    printf("keystore: checking the key pair\n");
     if (crypto_verify_32(sk + 32, pk) != 0 || !pair_works(pk, sk)) {
+        printf("keystore: key pair rejected\n");
         return KEYSTORE_ERR_MISMATCH;
     }
+    diag_stage(DIAG_STAGE_PAIR_OK);
+    printf("keystore: key pair ok, entering the storage path\n");
 
-    uint8_t payload[RECORD_MAX];
+    static uint8_t payload[RECORD_MAX];
     size_t len = record_encode(payload, sizeof(payload), pk, sk, device_id);
     if (len == 0) {
         return KEYSTORE_ERR_ARG;
     }
     if (!storage_write(payload, len)) {
+        printf("keystore: flash write failed\n");
         return KEYSTORE_ERR_FLASH;
     }
+    diag_stage(DIAG_STAGE_DONE);
+    printf("keystore: committed, writen=1\n");
 
     keystore_invalidate();
     return KEYSTORE_OK;
