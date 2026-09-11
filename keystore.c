@@ -25,10 +25,22 @@ static bool pair_works(const uint8_t pk[32], const uint8_t sk[64]) {
     static const char probe[] = "roman-provision-check";
     // static: crypto_sign() writes mlen + 64 bytes and this must not sit on the
     // stack of the deepest call path.
+    // Both buffers must hold the *signed* message (plaintext + 64 byte
+    // signature), not just the plaintext: crypto_sign_open() copies all n bytes
+    // of the signed message into m before it does anything else
+    // (tweetnacl.c: "FOR(i,n) m[i] = sm[i];"). Sizing m by the plaintext
+    // overruns the stack by 63 bytes on every provisioning attempt.
     static unsigned char signed_msg[sizeof(probe) + 64];
-    unsigned char recovered[sizeof(probe)];
+    static unsigned char recovered[sizeof(probe) + 64];
     unsigned long long signed_len = 0;
     unsigned long long recovered_len = 0;
+
+    // The contract above, enforced at compile time so it cannot silently break
+    // again (this is what the crash was).
+    _Static_assert(sizeof(recovered) >= sizeof(probe) - 1 + 64,
+                   "crypto_sign_open() needs room for the whole signed message");
+    _Static_assert(sizeof(signed_msg) >= sizeof(probe) - 1 + 64,
+                   "crypto_sign() writes mlen + 64 bytes");
 
     if (crypto_sign(signed_msg, &signed_len, (const unsigned char *)probe,
                     sizeof(probe) - 1, sk) != 0) {

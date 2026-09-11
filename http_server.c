@@ -498,7 +498,7 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      "\"storage\":{\"writen\":%s,\"available\":%s,\"selftest\":\"%s\","
                      "\"plaintext_len\":%u,\"max_payload\":%d,\"flash_offset\":%u},"
                      "\"roman\":{\"device_id\":%s,\"ed25519_pk\":\"%s\",\"x25519_pk\":\"%s\","
-                     "\"last_stage\":\"%s\"}"
+                     "\"last_stage\":\"%s\",\"reset_by_watchdog\":%s}"
                      "}}",
                      (unsigned)to_ms_since_boot(get_absolute_time()),
                      PICO_SDK_VERSION_STRING,
@@ -517,7 +517,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      available ? "true" : "false", selftest, (unsigned)plaintext_len,
                      STORAGE_MAX_PAYLOAD, DEBUG_STORAGE_FLASH_OFFSET,
                      id_json, ed_b64, x_b64,
-                     diag_stage_name(diag_previous_stage()));
+                     diag_stage_name(diag_boot_stage()),
+                     watchdog_caused_reboot() ? "true" : "false");
 
     if (n < 0 || (size_t)n >= sizeof(debug_json)) {
         WEB_STAT(errors);

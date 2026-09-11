@@ -9,6 +9,8 @@
 // power cycle) is not mistaken for a stage number.
 #define DIAG_MARKER 0x524F4D41u // "ROMA"
 
+static diag_stage_t boot_stage;
+
 void diag_stage(diag_stage_t stage) {
     // scratch[0..3] are ours: watchdog_reboot() only uses scratch[4..7].
     watchdog_hw->scratch[0] = DIAG_MARKER ^ (uint32_t)stage;
@@ -23,6 +25,15 @@ diag_stage_t diag_previous_stage(void) {
         return DIAG_STAGE_IDLE;
     }
     return (diag_stage_t)value;
+}
+
+void diag_capture_boot_stage(void) {
+    boot_stage = diag_previous_stage();
+    diag_stage(DIAG_STAGE_IDLE); // this run starts clean
+}
+
+diag_stage_t diag_boot_stage(void) {
+    return boot_stage;
 }
 
 const char *diag_stage_name(diag_stage_t stage) {

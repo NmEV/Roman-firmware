@@ -165,7 +165,9 @@ and the flash erase, so it carries extra instrumentation:
 * **Stage markers** (`diag.c`): every step of provisioning is written to a
   watchdog scratch register, which survives a watchdog reset but not a power
   cycle. The next boot logs `last_stage=...` and the snapshot carries
-  `roman.last_stage`, so a hang is localised **without** a UART adapter. Stages:
+  `roman.last_stage`, so a hang is localised **without** a UART adapter. The
+  value is captured into RAM at startup *before* the marker is cleared, so it
+  survives until the snapshot is read. Stages:
   `write-received`, `fields-ok`, `pair-check`, `pair-ok`, `entropy`,
   `boxing`, `erase`, `program`, `done`.
 * **Boot log** (UART, 115200): stack size, SDK version, reset cause, entropy
@@ -220,6 +222,14 @@ cleanly.
 ```sh
 python debug_tool.py --host 192.168.7.1 --interval 2 --auto
 ```
+
+`tools/pair_test.c` covers the provisioning key pair check with a canary placed
+right after the `crypto_sign_open()` output buffer. That check once crashed the
+firmware: the buffer was sized for the plaintext, while TweetNaCl copies the whole
+signed message into it first (`tweetnacl.c`: `FOR(i,n) m[i] = sm[i]`), so every
+`POST /write` overwrote 63 bytes of stack. `keystore.c` now enforces the contract
+with a `_Static_assert`, and the host test proves the round trip stays inside its
+buffer.
 
 `tools/record_test.c` unit tests the pure record codec and the strict base64
 decoder on the host (no Pico SDK needed):

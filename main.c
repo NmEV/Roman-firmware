@@ -31,9 +31,11 @@ int main() {
   // until it is unplugged; watchdog_caused_reboot() is reported by POST /debug
   // and in the boot log. 3 s is far above the worst case flash erase (~0.4 s).
   watchdog_enable(3000, true); // true: keep running while a debugger has us halted
+  // Capture how far the previous run got *before* clearing the marker: without
+  // this, POST /debug could never report it (there is no UART on the bench).
+  diag_capture_boot_stage();
   printf("roman: boot (reset_by_watchdog=%d, last_stage=%s)\n",
-         watchdog_caused_reboot() ? 1 : 0, diag_stage_name(diag_previous_stage()));
-  diag_stage(DIAG_STAGE_IDLE); // this boot starts clean
+         watchdog_caused_reboot() ? 1 : 0, diag_stage_name(diag_boot_stage()));
 
   // setup USB network
   if (!usb_network_init(&ownip, &netmask, &gateway, true)) {

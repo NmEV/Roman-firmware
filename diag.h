@@ -32,6 +32,14 @@ void diag_stage(diag_stage_t stage);
 // was not a watchdog reset (power cycle, flashing, /debug reset).
 diag_stage_t diag_previous_stage(void);
 
+// Captures the previous boot's stage into RAM and clears the marker for this
+// run. Call once, as early as possible in main(): the captured value is what
+// POST /debug reports, so the evidence is not wiped before it can be read.
+void diag_capture_boot_stage(void);
+
+// The stage captured at boot, i.e. how far the previous run got before it died.
+diag_stage_t diag_boot_stage(void);
+
 // Short human readable name for the boot log and the debug snapshot.
 const char *diag_stage_name(diag_stage_t stage);
 
