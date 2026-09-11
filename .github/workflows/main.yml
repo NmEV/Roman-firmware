@@ -1,0 +1,74 @@
+name: Build Pico 2 Firmware
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1️⃣ 拉取项目代码
+    - name: Checkout Project
+      uses: actions/checkout@v4
+
+    # 2️⃣ 安装基础构建依赖
+    - name: Install System Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y cmake build-essential git wget xz-utils
+    # 3️⃣ 下载并安装 ARM 交叉编译器
+    # 显式创建目录并解压，确保 PICO_TOOLCHAIN_PATH 路径可控
+    - name: Install ARM GCC Toolchain
+      run: |
+        wget -q https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz
+        mkdir -p ${{ github.workspace }}/arm-toolchain
+        tar -xJf arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz -C ${{ github.workspace }}/arm-toolchain --strip-components=1
+        
+        # 设置环境变量供后续 Step 使用
+        echo "PICO_TOOLCHAIN_PATH=${{ github.workspace }}/arm-toolchain" >> $GITHUB_ENV
+        echo "${{ github.workspace }}/arm-toolchain/bin" >> $GITHUB_PATH
+    # 4️⃣ 获取 Pico SDK (版本 2.2.0 以支持 Pico 2)
+    - name: Clone Pico SDK
+      run: |
+        git clone --depth 1 --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git
+        cd pico-sdk
+        git submodule update --init --recursive
+        
+        # 设置 SDK 绝对路径环境变量
+        echo "PICO_SDK_PATH=${{ github.workspace }}/pico-sdk" >> $GITHUB_ENV
+    # 5️⃣ 调试信息 (如果再次崩溃，查看此步骤日志)
+    - name: Debug Paths
+      run: |
+        echo "Workspace: ${{ github.workspace }}"
+        echo "SDK Path: $PICO_SDK_PATH"
+        echo "Toolchain Path: $PICO_TOOLCHAIN_PATH"
+        ls -l $PICO_SDK_PATH/pico_sdk_init.cmake
+    # 6️⃣ 运行 CMake 并编译
+    # 显式传入 PICO_BOARD 和工具链路径
+    - name: Build
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DPICO_BOARD=pico2 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPICO_TOOLCHAIN_PATH=${{ env.PICO_TOOLCHAIN_PATH }} \
+              ..
+        make -j$(nproc)
+    # 7️⃣ 上传固件制品
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: roman-firmware
+        # 根据 CMakeLists.txt，生成的文件名应为 roman.uf2
+        path: |
+          build/*.uf2
+          build/*.elf
+          build/*.bin
+
+          build/*.bin
+

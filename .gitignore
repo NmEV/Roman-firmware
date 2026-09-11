@@ -1,0 +1,4 @@
+build
+__pycache__/
+tools/record_test.exe
+tools/record_test
