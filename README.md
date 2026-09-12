@@ -50,15 +50,19 @@ What happens on success:
 |---|---|
 | already provisioned | `403 {"error":"already provisioned","writen":true}` |
 | malformed base64, wrong length, bad device id | `400 {"error":"invalid pk/sk/device_id"}` |
-| `pk` does not belong to `sk` | `400 {"error":"pk does not match sk"}` |
+| 64 byte `sk` whose embedded public key is not `pk` | `400 {"error":"pk does not match sk"}` |
 | body larger than 1024 bytes | `413` |
 | flash erase/program failed | `500` |
 
-The key pair is proven **before** it is committed: Roman signs a probe message
-with the supplied `sk` and verifies it with the supplied `pk`. TweetNaCl itself
-never cross-checks the two halves, and since provisioning happens only once, a
-mismatched pair would otherwise leave the board signing with a key nobody can
-verify.
+The only check the board performs is the cheap structural one: when `sk` is sent
+as a full 64 byte value, its embedded public key must equal `pk`. **The board
+does not verify that `pk` is derived from the 32 byte seed** - that check needs
+`crypto_sign_open()`, which does not fit the 4 KB stack (see
+[Stack budget](#stack-budget)). Verify it from the client instead, right after
+provisioning: take one signature from `POST /sign` and check it with your own
+`pk`, exactly as in the [acceptance test](#acceptance-test-on-hardware). If it
+fails, `POST /debug {"action":"clear"}` puts the board back into the empty state
+and you can provision again - no reflashing needed.
 
 ### POST /sign
 
@@ -223,20 +227,44 @@ cleanly.
 python debug_tool.py --host 192.168.7.1 --interval 2 --auto
 ```
 
-`tools/pair_test.c` covers the provisioning key pair check with a canary placed
-right after the `crypto_sign_open()` output buffer. That check once crashed the
-firmware: the buffer was sized for the plaintext, while TweetNaCl copies the whole
-signed message into it first (`tweetnacl.c`: `FOR(i,n) m[i] = sm[i]`), so every
-`POST /write` overwrote 63 bytes of stack. `keystore.c` now enforces the contract
-with a `_Static_assert`, and the host test proves the round trip stays inside its
-buffer.
-
 `tools/record_test.c` unit tests the pure record codec and the strict base64
 decoder on the host (no Pico SDK needed):
 
 ```sh
 cd tools && gcc -std=c11 -Wall -Wextra -I.. record_test.c ../record.c -o record_test && ./record_test
 ```
+
+## Stack budget
+
+The core-0 stack is capped at 4 KB (the pico-sdk places `.stack_dummy` in the
+4 KB SCRATCH_Y region; `PICO_STACK_SIZE` is already at that ceiling). TweetNaCl
+frames are large, so the depth of each path matters. Measured with
+`arm-none-eabi-gcc -O2 -mcpu=cortex-m33 -fstack-usage`:
+
+| Function | Frame |
+|---|---|
+| `crypto_scalarmult_curve25519` | 1496 B |
+| `crypto_sign_ed25519_tweet_open` | 1904 B |
+| `add` (called by sign_open) | 1200 B |
+| `crypto_sign_ed25519_tweet` | 1256 B |
+| `crypto_hash_sha512` (+ hashblocks) | 352 + 392 B |
+| `crypto_scalarmult` (field helper), `scalarbase`, `pack` | 32 / 528 / 432 B |
+
+Resulting peaks, including roughly 1 KB of lwIP receive chain and handler frames:
+
+| Path | Peak | Headroom |
+|---|---|---|
+| `POST /write` (crypto_box chain) | ~2.8-3.0 KB | ~1.1 KB |
+| `POST /sign` (crypto_sign + hash) | ~3.0 KB | ~1.1 KB |
+| `POST /debug` snapshot | ~1.2 KB | ~2.8 KB |
+| `crypto_sign_open` path (probe check) | ~4.0-4.3 KB | **overflows** |
+
+**Rule: never call `crypto_sign_open()` from this firmware.** Its own 1904 byte
+frame plus `add()`'s 1200 bytes do not fit under the 4 KB ceiling together with
+the network stack, and the failure mode is a silent lockup that only the watchdog
+recovers (it was reported as `last_stage=pair-check` before the probe was
+removed). Any change that introduces a deeper tweetnacl path has to be checked
+against this table first.
 
 ## Acceptance test on hardware
 
@@ -252,6 +280,11 @@ curl -X POST http://192.168.7.1/write \
      -d '{"pk":"<b64>","sk":"<b64>","device_id":"dev-02"}'      # 403
 curl -X POST http://192.168.7.1/sign -d '{"challenge":"c","context":"x","timestamp":"1"}'
                                                     # 200 + signature
+# Check that signature locally with your own pk: this is what proves the board
+# stored a key pair that matches the pk you sent (the board itself does not):
+#   echo -n "c:x:1:dev-01" > msg.bin
+#   echo "<signature>" | base64 -d > sig.bin
+#   openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in msg.bin -sigfile sig.bin
 # power cycle the board, then:
 curl http://192.168.7.1/info                        # still provisioned (persistence)
 curl -X POST http://192.168.7.1/debug               # snapshot, roman.writen = true

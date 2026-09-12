@@ -16,42 +16,20 @@ static uint8_t cached_sk[64];
 static char cached_id[RECORD_MAX_DEVICE_ID + 1];
 static bool cache_valid;
 
-// crypto_sign() never checks that sk[32..63] really is the public key belonging
-// to sk[0..31]: a mismatched pair would silently produce signatures nobody can
-// verify. /write only ever succeeds once, so the pair is proven here - sign a
-// fixed probe and verify it with the supplied public key - before it is
-// committed to flash.
-static bool pair_works(const uint8_t pk[32], const uint8_t sk[64]) {
-    static const char probe[] = "roman-provision-check";
-    // static: crypto_sign() writes mlen + 64 bytes and this must not sit on the
-    // stack of the deepest call path.
-    // Both buffers must hold the *signed* message (plaintext + 64 byte
-    // signature), not just the plaintext: crypto_sign_open() copies all n bytes
-    // of the signed message into m before it does anything else
-    // (tweetnacl.c: "FOR(i,n) m[i] = sm[i];"). Sizing m by the plaintext
-    // overruns the stack by 63 bytes on every provisioning attempt.
-    static unsigned char signed_msg[sizeof(probe) + 64];
-    static unsigned char recovered[sizeof(probe) + 64];
-    unsigned long long signed_len = 0;
-    unsigned long long recovered_len = 0;
-
-    // The contract above, enforced at compile time so it cannot silently break
-    // again (this is what the crash was).
-    _Static_assert(sizeof(recovered) >= sizeof(probe) - 1 + 64,
-                   "crypto_sign_open() needs room for the whole signed message");
-    _Static_assert(sizeof(signed_msg) >= sizeof(probe) - 1 + 64,
-                   "crypto_sign() writes mlen + 64 bytes");
-
-    if (crypto_sign(signed_msg, &signed_len, (const unsigned char *)probe,
-                    sizeof(probe) - 1, sk) != 0) {
-        return false;
-    }
-    if (crypto_sign_open(recovered, &recovered_len, signed_msg, signed_len, pk) != 0) {
-        return false;
-    }
-    return recovered_len == sizeof(probe) - 1 &&
-           memcmp(recovered, probe, sizeof(probe) - 1) == 0;
-}
+// NOTE - do not call crypto_sign_open() in this firmware.
+//
+// Provisioning used to prove that pk really belongs to sk by signing a probe and
+// verifying it. That path does not fit the 4 KB core-0 stack: crypto_sign_open()
+// has a 1904 byte frame and its add() call adds another 1200 bytes, so the pair
+// check alone peaks at 3104 bytes, and with the lwIP receive chain and an
+// interrupt frame on top it exceeded PICO_STACK_SIZE (4096). The stack guard
+// fired, the exception entry could not push either (lockup), and only the
+// watchdog recovered the board - reported as last_stage=pair-check.
+//
+// See the "Stack budget" section in README.md for the measured numbers. The
+// cheap structural check in keystore_provision() (crypto_verify_32) is all that
+// is left here; whether pk matches the seed is verified by the *client* after
+// provisioning, by checking one signature from POST /sign.
 
 static bool keystore_load(void) {
     if (cache_valid) {
@@ -102,8 +80,8 @@ keystore_status_t keystore_provision(const char *pk_b64, const char *sk_b64,
     diag_stage(DIAG_STAGE_FIELDS_OK);
     printf("keystore: fields accepted, device_id=%s\n", device_id);
 
-    // Static, not on the stack: provisioning funnels into the deepest crypto
-    // chain in the firmware (see the stack note in README.md).
+    // Static, not on the stack: provisioning funnels into the crypto_box chain
+    // (see the Stack budget section in README.md).
     static uint8_t pk[32];
     if (record_b64_decode(pk_b64, pk, sizeof(pk)) != 32) {
         return KEYSTORE_ERR_ARG;
@@ -117,9 +95,13 @@ keystore_status_t keystore_provision(const char *pk_b64, const char *sk_b64,
         return KEYSTORE_ERR_ARG;
     }
 
+    // Cheap structural check only (no crypto, no extra stack): when the client
+    // sends a full 64 byte sk, its embedded public key must be the one it also
+    // sent. Whether pk really is derived from the seed is NOT checked here - see
+    // the note above and the acceptance test in README.md.
     diag_stage(DIAG_STAGE_PAIR_CHECK);
     printf("keystore: checking the key pair\n");
-    if (crypto_verify_32(sk + 32, pk) != 0 || !pair_works(pk, sk)) {
+    if (crypto_verify_32(sk + 32, pk) != 0) {
         printf("keystore: key pair rejected\n");
         return KEYSTORE_ERR_MISMATCH;
     }
