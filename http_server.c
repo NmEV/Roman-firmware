@@ -237,6 +237,15 @@ static void http_send_404(struct tcp_pcb *pcb, http_state_t *st) {
     http_send_response(pcb, st, 404, "{\"error\":\"not found\"}");
 }
 
+// Same, but also logs what was actually parsed. A routing (or request line
+// parsing) bug then shows up in the UART log as "404 GETT /infoe" instead of a
+// bare 404 that says nothing.
+static void http_send_404_logged(struct tcp_pcb *pcb, http_state_t *st,
+                                 const char *method, const char *path) {
+    printf("http: 404 %s %s\n", method, path);
+    http_send_404(pcb, st);
+}
+
 // ---------------------------------------------------------------------------
 // POST /sign
 // ---------------------------------------------------------------------------
@@ -579,14 +588,18 @@ static void handle_debug(struct tcp_pcb *pcb, http_state_t *st, const char *body
 // ---------------------------------------------------------------------------
 
 static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
-    // Static, not on the stack: every byte of margin counts on the deep crypto
-    // paths below (see the stack note in README.md).
-    static char method[16], path[128];
-    method[0] = '\0';
-    path[0] = '\0';
+    // Zero initialised on EVERY request, so the copies below are always NUL
+    // terminated. These two were made static once to save stack, which silently
+    // kept the tail of the previous request and made strcmp() miss routes that do
+    // exist: POST /debug then GET /info left "GETT" / "/infoe" behind and /info
+    // and /sign answered 404 depending on request order. The 144 bytes are
+    // affordable - see the Stack budget section in README.md.
+    char method[16] = {0};
+    char path[128] = {0};
 
     char *sp1 = strchr(st->buf, ' ');
     if (!sp1) {
+        printf("http: malformed request line (no method)\n");
         http_send_404(pcb, st);
         return;
     }
@@ -597,6 +610,7 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
     sp1++;
     char *sp2 = strchr(sp1, ' ');
     if (!sp2) {
+        printf("http: malformed request line (no path)\n");
         http_send_404(pcb, st);
         return;
     }
@@ -631,7 +645,7 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
                 "{\"endpoint\":\"/sign\",\"method\":\"POST\","
                 "\"fields\":[\"challenge\",\"context\",\"timestamp\"]}");
         } else {
-            http_send_404(pcb, st);
+            http_send_404_logged(pcb, st, method, path);
         }
         return;
     }
@@ -646,12 +660,12 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
             handle_debug(pcb, st, body);
 #endif
         } else {
-            http_send_404(pcb, st);
+            http_send_404_logged(pcb, st, method, path);
         }
         return;
     }
 
-    http_send_404(pcb, st);
+    http_send_404_logged(pcb, st, method, path);
 }
 
 // ---------------------------------------------------------------------------

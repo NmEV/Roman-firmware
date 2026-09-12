@@ -179,6 +179,10 @@ and the flash erase, so it carries extra instrumentation:
 * **Panic output**: a stack guard violation (UsageFault) makes the SDK print
   `PANIC` plus a file and line on that same UART - the difference between a
   fault and a silent stall.
+* **404 logging**: every 404 prints the method and path that were actually parsed
+  (`http: 404 GETT /infoe`), and a request line without a method or path prints
+  its own line. A routing bug that would otherwise be a bare `404 not found` is
+  therefore visible in the log; `web.not_found` in the snapshot counts them.
 
 If `/write` times out: wait 3 s for the watchdog (or replug), read
 `roman.last_stage`, and compare it with the boot log. Provisioning leaves the
