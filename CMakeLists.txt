@@ -48,6 +48,7 @@ add_executable(roman
     http_server.c
     keystore.c
     record.c
+    stack.c
     storage.c
     led.c
     usb_network.c

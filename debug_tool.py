@@ -208,6 +208,9 @@ SNAPSHOT_LAYOUT = (
     ("系统", "unique_id", str, ("unique_id",)),
     ("系统", "reset_by_watchdog", format_bool, ("reset_by_watchdog",)),
     ("系统", "stack.used_now", format_bytes, ("stack", "used_now")),
+    ("系统", "stack.used_max", format_bytes, ("stack", "used_max")),
+    # 最小剩余栈空间：新增深层调用后必须看这一项（见 README 的 Stack budget）
+    ("系统", "stack.free_min", format_bytes, ("stack", "free_min")),
     ("系统", "stack.total", format_bytes, ("stack", "total")),
     ("网络", "net.ip", str, ("net", "ip")),
     ("网络", "net.mac", str, ("net", "mac")),

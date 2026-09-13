@@ -1,8 +1,9 @@
-// Post-mortem progress markers for the provisioning path.
+// Post-mortem progress markers for the two deep paths: provisioning and signing.
 //
-// POST /write is the only code path in Roman that runs the deep crypto chain
-// and the flash erase, and a fault or a stall in there used to leave the board
-// dead until it was unplugged. The stage markers below go into the watchdog
+// POST /write runs the crypto and the flash erase, POST /sign runs the single
+// deepest tweetnacl chain in the firmware (crypto_sign -> scalarbase ->
+// scalarmult -> add); a fault or a stall in either used to leave the board dead
+// until it was unplugged. The stage markers below go into the watchdog
 // scratch registers, which survive a watchdog reset, so the *next* boot can
 // report how far the previous one got - in the boot log and in the POST /debug
 // snapshot, without needing a UART adapter.
@@ -24,7 +25,13 @@ typedef enum {
     DIAG_STAGE_PROGRAM,      // programming the record
     DIAG_STAGE_DONE,         // committed, writen == 1
     DIAG_STAGE_CLEAR,        // erasing the record for POST /clear
-    DIAG_STAGE_MAX = DIAG_STAGE_CLEAR, // keep this last: bounds the range check
+    DIAG_STAGE_SIGN_ENTER,   // POST /sign received
+    DIAG_STAGE_SIGN_KEY,     // signing key and device id decrypted
+    DIAG_STAGE_SIGN_PARSE,   // challenge/context/timestamp parsed
+    DIAG_STAGE_SIGN_CRYPTO,  // inside crypto_sign (the deepest chain there is)
+    DIAG_STAGE_SIGN_REPLY,   // signature computed, building the reply
+    DIAG_STAGE_SIGN_DONE,    // 200 answered
+    DIAG_STAGE_MAX = DIAG_STAGE_SIGN_DONE, // keep this last: bounds the range check
 } diag_stage_t;
 
 // Records the stage currently being executed.

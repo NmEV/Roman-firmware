@@ -68,6 +68,12 @@ jobs:
         grep -q 'pico_config.h' "$HDR" || {
           echo "::error::pico_config.h was NOT injected - PICO_STACK_SIZE and PICO_FLASH_ASSUME_CORE1_SAFE would silently not apply"; exit 1; }
         echo "pico_config.h is injected into config_autogen.h"
+    # 6c) 打印镜像与栈符号：固件自己报告 stack.total/free_min，这里给出构建期
+    # 证据（运行期栈在 .bss 里，RAM 吃紧会让链接期断言先失败）
+    - name: Report image size and stack symbols
+      run: |
+        arm-none-eabi-size build/roman.elf
+        arm-none-eabi-nm build/roman.elf | grep -Ei 'stack' || true
     # 7️⃣ 上传固件制品
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4

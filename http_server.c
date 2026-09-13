@@ -20,6 +20,7 @@
 #include "keystore.h"
 #include "led.h"
 #include "record.h"
+#include "stack.h"
 #include "storage.h"
 #include "tweetnacl.h"
 
@@ -32,11 +33,10 @@
 #include "pico/unique_id.h"
 #endif
 
-// Core 0 stack bounds, provided by the default linker script
-// (pico_standard_link/script_include/section_end.incl). Reported at boot and by
+// The stack actually in use is the one main() switched to (stack.h):
+// PICO_STACK_SIZE only covers the SDK boot stack in SCRATCH_Y, and every deep
+// tweetnacl chain runs on the 16 KB SRAM stack instead. Reported at boot and by
 // POST /debug.
-extern uint32_t __StackTop;
-extern uint32_t __StackBottom;
 
 #define HTTP_PORT 80
 #define HTTP_MAX_CONN 3
@@ -255,12 +255,15 @@ static void http_send_404_logged(struct tcp_pcb *pcb, http_state_t *st,
 
 static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *body) {
     led_signal_signing();
+    diag_stage(DIAG_STAGE_SIGN_ENTER);
 
     if (body == NULL || *body == '\0') {
         WEB_STAT(sign_bad);
         http_send_response(pcb, st, 400, "{\"error\":\"Empty request body\"}");
         return;
     }
+
+    diag_stage(DIAG_STAGE_SIGN_KEY);
 
     // The signing key lives in flash; without a provisioned record there is
     // nothing this endpoint can do.
@@ -279,6 +282,8 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
         http_send_response(pcb, st, 503, "{\"error\":\"stored record is corrupt\"}");
         return;
     }
+
+    diag_stage(DIAG_STAGE_SIGN_PARSE);
 
     // Static, not on the stack: the signing path is the deepest call chain in
     // the firmware and the server handles one request at a time.
@@ -312,11 +317,16 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
         return;
     }
 
+    // The deepest chain in the firmware: crypto_sign -> scalarbase -> scalarmult
+    // -> add. It is why main() moved the stack into SRAM, and the marker makes a
+    // future stall land on a named stage instead of "none".
+    diag_stage(DIAG_STAGE_SIGN_CRYPTO);
     unsigned long long smlen = 0;
     crypto_sign(sig_sm, &smlen, (const unsigned char *)sign_body,
                 (unsigned long long)msg_len, sk);
     memset(sk, 0, sizeof(sk)); // the key was only needed for this signature
 
+    diag_stage(DIAG_STAGE_SIGN_REPLY);
     base64_encode(sig_sm, 64, sig_b64);
 
     snprintf(sign_body, sizeof(sign_body),
@@ -324,6 +334,7 @@ static void handle_sign_post(struct tcp_pcb *pcb, http_state_t *st, const char *
              sig_b64, timestamp, device_id);
     WEB_STAT(sign_ok);
     http_send_response(pcb, st, 200, sign_body);
+    diag_stage(DIAG_STAGE_SIGN_DONE);
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +528,11 @@ static const char *debug_selftest(size_t *plaintext_len, bool *available) {
 }
 
 static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
+    // Refresh the worst case before reporting it: the deep chain of this very
+    // request (storage_read -> crypto_box_open -> crypto_scalarmult) has already
+    // written into the paint.
+    stack_check();
+
     size_t plaintext_len = 0;
     bool available = false;
     const char *selftest = debug_selftest(&plaintext_len, &available);
@@ -569,7 +585,7 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      "{\"status\":\"ok\",\"debug\":{"
                      "\"uptime_ms\":%u,\"sdk\":\"%s\",\"cpu_mhz\":%u,\"unique_id\":\"%s\","
                      "\"reset_by_watchdog\":%s,"
-                     "\"stack\":{\"used_now\":%u,\"total\":%u},"
+                     "\"stack\":{\"used_now\":%u,\"total\":%u,\"used_max\":%u,\"free_min\":%u},"
                      "\"net\":{\"ip\":\"%s\",\"mac\":\"%s\",\"link_up\":%s},"
                      "\"web\":{\"conns\":%u,\"conns_max\":%d,\"requests\":%u,\"sign_ok\":%u,"
                      "\"sign_bad\":%u,\"write_ok\":%u,\"write_bad\":%u,\"clear_ok\":%u,"
@@ -584,8 +600,10 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      (unsigned)(clock_get_hz(clk_sys) / 1000000u),
                      unique_id,
                      watchdog_caused_reboot() ? "true" : "false",
-                     (unsigned)((uintptr_t)&__StackTop - (uintptr_t)__builtin_frame_address(0)),
-                     (unsigned)((uintptr_t)&__StackTop - (uintptr_t)&__StackBottom),
+                     (unsigned)stack_used_now(),
+                     (unsigned)stack_total(),
+                     (unsigned)stack_used_max(),
+                     (unsigned)stack_free_min(),
                      ip, mac, link_up ? "true" : "false",
                      conns, HTTP_MAX_CONN,
                      (unsigned)http_stats.requests, (unsigned)http_stats.sign_ok,
@@ -882,8 +900,8 @@ bool http_server_init(void) {
     }
     // Boot diagnostics: the two numbers that decide whether the deep crypto
     // paths have room, and which entropy path is in use.
-    printf("http: stack %u bytes, sdk %s, reset_by_watchdog=%d\n",
-           (unsigned)((uintptr_t)&__StackTop - (uintptr_t)&__StackBottom),
+    printf("http: stack %u bytes (used_max %u, free_min %u), sdk %s, reset_by_watchdog=%d\n",
+           (unsigned)stack_total(), (unsigned)stack_used_max(), (unsigned)stack_free_min(),
            PICO_SDK_VERSION_STRING,
            watchdog_caused_reboot() ? 1 : 0);
     printf("http: entropy source: %s\n",

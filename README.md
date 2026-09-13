@@ -69,13 +69,14 @@ which the board only ever saw once.
 
 The only check the board performs is the cheap structural one: when `sk` is sent
 as a full 64 byte value, its embedded public key must equal `pk`. **The board
-does not verify that `pk` is derived from the 32 byte seed** - that check needs
-`crypto_sign_open()`, which does not fit the 4 KB stack (see
-[Stack budget](#stack-budget)). Verify it from the client instead, right after
-provisioning: take one signature from `POST /sign` and check it with your own
-`pk`, exactly as in the [acceptance test](#acceptance-test-on-hardware). If it
-fails, `POST /debug {"action":"clear"}` puts the board back into the empty state
-and you can provision again - no reflashing needed.
+does not verify that `pk` is derived from the 32 byte seed** - deliberately so,
+even though the `crypto_sign_open()` check would fit the 16 KB stack now: the
+board should not endorse a key it was simply handed. Verify it from the client
+instead, right after provisioning: take one signature from `POST /sign` and check
+it with your own `pk`, exactly as in the
+[acceptance test](#acceptance-test-on-hardware). If it fails,
+`POST /debug {"action":"clear"}` puts the board back into the empty state and you
+can provision again - no reflashing needed.
 
 ### POST /clear
 
@@ -145,7 +146,7 @@ and `POST /debug` falls through to 404.
 
 | Body | Result |
 |---|---|
-| *(empty)*, `{}`, `{"action":"snapshot"}` | diagnostics snapshot (system, network, request counters, storage, Roman block) |
+| *(empty)*, `{}`, `{"action":"snapshot"}` | diagnostics snapshot (system, network, request counters, storage, stack headroom, Roman block) |
 | `{"action":"clear"}` | erases the record: `writen` returns to 0 and the board can be provisioned again |
 | `{"action":"reset"}` | reboots the board ~100 ms after the reply has been acknowledged |
 | anything else | 400 |
@@ -204,8 +205,9 @@ erase part of the program, so the build fails instead.
 
 ## Troubleshooting
 
-Provisioning (`POST /write`) is the only path that runs the deep crypto chain
-and the flash erase, so it carries extra instrumentation:
+Two paths run the deep crypto and carry extra instrumentation: `POST /write`
+(boxing + the flash erase) and `POST /sign` (the single deepest tweetnacl chain
+in the firmware).
 
 * **Hardware watchdog** (3 s, armed in `main.c`): if anything in a handler
   stalls, the board reboots itself instead of staying dead until it is unplugged.
@@ -217,21 +219,34 @@ and the flash erase, so it carries extra instrumentation:
   value is captured into RAM at startup *before* the marker is cleared, so it
   survives until the snapshot is read. Stages:
   `write-received`, `fields-ok`, `pair-check`, `pair-ok`, `entropy`,
-  `boxing`, `erase`, `program`, `done`.
-* **Boot log** (UART, 115200): stack size, SDK version, reset cause, entropy
-  source and storage state.
+  `boxing`, `erase`, `program`, `done` for provisioning, and
+  `sign-enter`, `sign-key`, `sign-parse`, `sign-crypto`, `sign-reply`,
+  `sign-done` for signing.
+* **Boot log** (UART, 115200): the size of the stack the firmware runs on
+  (16384), the SDK version, the reset cause, the entropy source and the storage
+  state.
 * **Panic output**: a stack guard violation (UsageFault) makes the SDK print
   `PANIC` plus a file and line on that same UART - the difference between a
-  fault and a silent stall.
+  fault and a silent stall. A fault raised on *exception entry* cannot print at
+  all (there is no room to push a frame): the board then goes quiet and the
+  watchdog reboots it 3 s later. The `/sign` failure this firmware fixes looked
+  exactly like that.
+* **Stack headroom** (`POST /debug`): `stack.used_max` / `stack.free_min`
+  report the deepest the stack has been and what is left. Read them after
+  exercising the endpoints; they are the measurement behind the
+  [Stack budget](#stack-budget) table.
 * **404 logging**: every 404 prints the method and path that were actually parsed
   (`http: 404 GETT /infoe`), and a request line without a method or path prints
   its own line. A routing bug that would otherwise be a bare `404 not found` is
   therefore visible in the log; `web.not_found` in the snapshot counts them.
 
-If `/write` times out: wait 3 s for the watchdog (or replug), read
-`roman.last_stage`, and compare it with the boot log. Provisioning leaves the
-sector empty when it does not complete, so the board can simply be provisioned
-again - `writen` is only set once the whole record has been programmed.
+If a request **times out or drops the connection after ~3 s**, that is the
+watchdog rebooting a board that crashed: read `reset_by_watchdog` and
+`roman.last_stage` from `POST /debug`, which names the step the previous run
+died in (`sign-crypto` = inside `crypto_sign`, `program` = inside the flash
+write). Provisioning leaves the sector empty when it does not complete, so the
+board can simply be provisioned again - `writen` is only set once the whole
+record has been programmed.
 
 ## Entropy note
 
@@ -282,37 +297,65 @@ decoder on the host (no Pico SDK needed):
 cd tools && gcc -std=c11 -Wall -Wextra -I.. record_test.c ../record.c -o record_test && ./record_test
 ```
 
+`tools/stack_test.c` does the same for the stack watermark scan in `stack.c`,
+which is what `stack.free_min` is computed from:
+
+```sh
+cd tools && gcc -std=c11 -Wall -Wextra -I.. stack_test.c ../stack.c -o stack_test && ./stack_test
+```
+
 ## Stack budget
 
-The core-0 stack is capped at 4 KB (the pico-sdk places `.stack_dummy` in the
-4 KB SCRATCH_Y region; `PICO_STACK_SIZE` is already at that ceiling). TweetNaCl
-frames are large, so the depth of each path matters. Measured with
-`arm-none-eabi-gcc -O2 -mcpu=cortex-m33 -fstack-usage`:
+The stack a request runs on is **not** the 4 KB the SDK reserves. The pico-sdk
+places `.stack_dummy` in the 4 KB SCRATCH_Y region and pins `__StackTop` to the
+top of it, so `PICO_STACK_SIZE` cannot grow past 0x1000 (an 8 KB setting fails to
+link with `section '.stack_dummy' will not fit in region 'SCRATCH_Y'`). `main()`
+is therefore **naked** and switches MSP to a 16 KB stack in SRAM before any C
+code runs on it (`stack.c`); SCRATCH_Y is left to the SDK boot code. It lowers
+MSPLIM first and only then moves MSP, because Armv8-M requires `MSPLIM <= MSP` at
+every instant - the other order would make an exception entry in between illegal,
+which is a lockup rather than a fault.
+
+Measured with `arm-none-eabi-gcc -O3 -mcpu=cortex-m33 -fstack-usage`. The frames
+are dominated by fixed size arrays, so the toolchain version does not change the
+picture:
 
 | Function | Frame |
 |---|---|
-| `crypto_scalarmult_curve25519` | 1496 B |
-| `crypto_sign_ed25519_tweet_open` | 1904 B |
-| `add` (called by sign_open) | 1200 B |
-| `crypto_sign_ed25519_tweet` | 1256 B |
-| `crypto_hash_sha512` (+ hashblocks) | 352 + 392 B |
-| `crypto_scalarmult` (field helper), `scalarbase`, `pack` | 32 / 528 / 432 B |
+| `crypto_scalarmult` (whole X25519 ladder, inline) | 2232 B |
+| `crypto_sign_open` | 1920 B |
+| `add` (**called from inside `scalarmult`'s 256 iteration loop**) | 1736 B |
+| `crypto_sign` | 1488 B |
+| `scalarbase` / `crypto_hash` / `crypto_hashblocks` | 528 / 352 / 376 B |
 
-Resulting peaks, including roughly 1 KB of lwIP receive chain and handler frames:
+The peaks that matter, with the USB -> lwIP -> HTTP chain below them. That chain
+is **~0.6 KB** - read from `stack.used_now` at snapshot time, i.e. after the
+crypto frames have been popped - not the ~1 KB that was assumed before:
 
-| Path | Peak | Headroom |
+| Path | Peak chain | Verdict |
 |---|---|---|
-| `POST /write` (crypto_box chain) | ~2.8-3.0 KB | ~1.1 KB |
-| `POST /sign` (crypto_sign + hash) | ~3.0 KB | ~1.1 KB |
-| `POST /debug` snapshot | ~1.2 KB | ~2.8 KB |
-| `crypto_sign_open` path (probe check) | ~4.0-4.3 KB | **overflows** |
+| `POST /sign`: `crypto_sign` -> `scalarbase` -> `scalarmult` -> `add` | **~4.4 KB** | did not fit 4 KB: the `add` frames stay live under `crypto_sign`'s own frame, the stack guard faulted on exception entry (no output at all) and the watchdog reset the board 3 s later |
+| `/info`, `/debug`: `crypto_box_open` -> `beforenm` -> `crypto_scalarmult` | ~3.5-3.9 KB | fitted, with a few hundred bytes to spare - which is why `/info` worked while `/sign` died |
+| `/write`: `crypto_box` + flash erase | ~3.5 KB | fitted |
 
-**Rule: never call `crypto_sign_open()` from this firmware.** Its own 1904 byte
-frame plus `add()`'s 1200 bytes do not fit under the 4 KB ceiling together with
-the network stack, and the failure mode is a silent lockup that only the watchdog
-recovers (it was reported as `last_stage=pair-check` before the probe was
-removed). Any change that introduces a deeper tweetnacl path has to be checked
-against this table first.
+With the 16 KB stack the worst chain above leaves about 11 KB, and the firmware
+reports the real number instead of an estimate:
+
+* `stack.total` - size of the stack in use (16384)
+* `stack.used_now` - how deep the snapshot itself is
+* `stack.used_max` - the deepest the stack has been since boot (paint watermark)
+* `stack.free_min` - `total - used_max`: **the number to watch**
+
+**Rule: after adding any deep call chain, exercise it and read `stack.free_min`
+from `POST /debug` on hardware.** Getting it wrong does not produce a nice panic:
+a stack guard violation raised while pushing the exception frame cannot report
+anything, so the board locks up silently, drops the connection and is rebooted by
+the 3 s watchdog (`reset_by_watchdog: true`, `roman.last_stage` naming the step).
+
+The watermark is exact unless the deepest bytes written happen to equal the paint
+value (0xC5): those read as untouched and under-report usage by a few bytes. If an
+interrupt lands while `stack_init()` paints, the report is a few bytes too high
+instead. `tools/stack_test.c` covers the scan, including both directions.
 
 ## Acceptance test on hardware
 
@@ -333,6 +376,16 @@ curl -X POST http://192.168.7.1/sign -d '{"challenge":"c","context":"x","timesta
 #   echo -n "c:x:1:dev-01" > msg.bin
 #   echo "<signature>" | base64 -d > sig.bin
 #   openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in msg.bin -sigfile sig.bin
+curl -X POST http://192.168.7.1/debug -d '{"action":"snapshot"}'
+#   stack.total     16384
+#   stack.used_max  ~4600 after the /sign above (the deep chain leaves a mark)
+#   stack.free_min  > 10000  <- the headroom, see Stack budget
+# /sign must not kill the connection: repeat it and watch reset_by_watchdog
+for i in 1 2 3 4 5; do
+  curl -s -X POST http://192.168.7.1/sign \
+       -d '{"challenge":"c","context":"x","timestamp":"1"}'; echo
+done
+curl -X POST http://192.168.7.1/debug -d '{"action":"snapshot"}'   # sign_ok 6, reset_by_watchdog false
 # power cycle the board, then:
 curl http://192.168.7.1/info                        # still provisioned (persistence)
 curl -X POST http://192.168.7.1/debug               # snapshot, roman.writen = true

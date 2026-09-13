@@ -48,6 +48,12 @@ const char *diag_stage_name(diag_stage_t stage) {
         case DIAG_STAGE_PROGRAM:    return "program";
         case DIAG_STAGE_DONE:       return "done";
         case DIAG_STAGE_CLEAR:      return "clear";
+        case DIAG_STAGE_SIGN_ENTER: return "sign-enter";
+        case DIAG_STAGE_SIGN_KEY:   return "sign-key";
+        case DIAG_STAGE_SIGN_PARSE: return "sign-parse";
+        case DIAG_STAGE_SIGN_CRYPTO:return "sign-crypto";
+        case DIAG_STAGE_SIGN_REPLY: return "sign-reply";
+        case DIAG_STAGE_SIGN_DONE:  return "sign-done";
         case DIAG_STAGE_IDLE:
         default:                    return "none";
     }

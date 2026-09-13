@@ -9,15 +9,18 @@
 #ifndef ROMAN_PICO_CONFIG_H
 #define ROMAN_PICO_CONFIG_H
 
-// The tweetnacl paths Roman uses (crypto_sign for /sign, crypto_box for the
-// encrypted store) both call crypto_scalarmult, which uses about 1.5 KB of
-// stack, and they run deep inside the lwIP/web callback chain. The default 2 KB
-// stack is too tight, so reserve the full 4 KB.
+// Size of the SDK boot stack: crt0 runs on this one until main() relocates the
+// stack. It is deliberately left at the ceiling rather than tuned.
 //
-// NOTE: the pico-sdk linker places the core-0 stack (.stack_dummy) in the
-// 4 KB SCRATCH_Y region, so PICO_STACK_SIZE cannot exceed 0x1000 with the
-// default memmap (an 8 KB setting fails to link with
-// "section `.stack_dummy' will not fit in region `SCRATCH_Y'").
+// NOTE: the pico-sdk linker places the core-0 stack (.stack_dummy) in the 4 KB
+// SCRATCH_Y region and pins __StackTop to the top of it, so PICO_STACK_SIZE
+// cannot exceed 0x1000 with the default memmap (an 8 KB setting fails to link
+// with "section `.stack_dummy' will not fit in region `SCRATCH_Y'"). That
+// ceiling is exactly why this is NOT the stack the firmware runs on: the
+// tweetnacl chains alone need more than 4 KB (crypto_sign -> scalarbase ->
+// scalarmult -> add peaks around 3.8 KB with the receive chain below it), so
+// main() switches MSP to the 16 KB stack in stack.c before any C code runs.
+// See the Stack budget section in README.md.
 #ifndef PICO_STACK_SIZE
 #define PICO_STACK_SIZE 0x1000
 #endif
@@ -25,9 +28,11 @@
 // Hardware-enforced stack overflow protection.
 //
 // On RP2350-ARM the SDK's runtime init sets the Armv8-M MSPLIM register to the
-// stack bottom, so every stack push below the limit raises a UsageFault
-// instead of silently corrupting adjacent SRAM (this is what the crypto_box
-// stack usage is measured against). On RP2040 the SDK uses the Armv6-M MPU,
+// boot stack bottom, and main() re-points it at the 16 KB SRAM stack it
+// switches to, so every push below the real stack bottom raises a UsageFault
+// instead of silently corrupting adjacent SRAM - which is how the POST /sign
+// overflow showed up (silent lockup, recovered only by the watchdog).
+// On RP2040 the SDK uses the Armv6-M MPU,
 // on RISC-V the PMP. Any stack overflow now traps immediately at runtime.
 #ifndef PICO_USE_STACK_GUARDS
 #define PICO_USE_STACK_GUARDS 1
