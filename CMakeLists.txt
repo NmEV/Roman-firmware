@@ -41,7 +41,12 @@ include(pico_sdk_import.cmake)
 # report it. Bump it with every firmware change.
 set(ROMAN_VERSION 0.2)
 
-project(roman C CXX ASM VERSION ${ROMAN_VERSION})
+# NOTE: with VERSION (or DESCRIPTION/HOMEPAGE_URL) the language names must
+# follow the LANGUAGES keyword - "project(roman C CXX ASM VERSION ...)" makes
+# CMake refuse to configure with:
+#   project with VERSION, DESCRIPTION or HOMEPAGE_URL must use LANGUAGES
+# before language names.
+project(roman VERSION ${ROMAN_VERSION} LANGUAGES C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
