@@ -203,6 +203,7 @@ SELFTEST_ZH = {"ok": "正常", "empty": "空", "corrupt": "损坏"}
 # (group, key, value formatter, source path inside the snapshot)
 SNAPSHOT_LAYOUT = (
     ("系统", "uptime_ms", format_uptime, ("uptime_ms",)),
+    ("系统", "firmware", str, ("firmware",)),
     ("系统", "sdk", str, ("sdk",)),
     ("系统", "cpu_mhz", lambda v: "%s MHz" % v if v is not None else "-", ("cpu_mhz",)),
     ("系统", "unique_id", str, ("unique_id",)),

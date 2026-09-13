@@ -35,12 +35,18 @@ set(PICO_CONFIG_HEADER_FILES "${CMAKE_CURRENT_SOURCE_DIR}/pico_config.h" CACHE S
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(roman C CXX ASM)
+# Firmware version - the ONLY place it is written down. pico_set_program_version()
+# below defines PICO_PROGRAM_VERSION_STRING for the code (version.h) and records
+# the same string as binary info (picotool); GET /info, GET / and POST /debug all
+# report it. Bump it with every firmware change.
+set(ROMAN_VERSION 0.2)
+
+project(roman C CXX ASM VERSION ${ROMAN_VERSION})
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# Add executable. Default name is the project name, version 0.1
+# Add executable. Default name is the project name.
 
 add_executable(roman
     main.c
@@ -59,7 +65,7 @@ add_executable(roman
 )
 
 pico_set_program_name(roman "roman")
-pico_set_program_version(roman "0.1")
+pico_set_program_version(roman "${ROMAN_VERSION}")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(roman 1)

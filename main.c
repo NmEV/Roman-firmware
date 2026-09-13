@@ -20,6 +20,7 @@
 #include "led.h"
 #include "stack.h"
 #include "usb_network.h"
+#include "version.h"
 
 // usb network addresses
 static const ip4_addr_t ownip = IPADDR4_INIT_BYTES(192, 168, 7, 1);
@@ -64,8 +65,9 @@ int app_main(void) {
   // Capture how far the previous run got *before* clearing the marker: without
   // this, POST /debug could never report it (there is no UART on the bench).
   diag_capture_boot_stage();
-  printf("roman: boot (reset_by_watchdog=%d, last_stage=%s)\n",
-         watchdog_caused_reboot() ? 1 : 0, diag_stage_name(diag_boot_stage()));
+  printf("roman: v%s boot (reset_by_watchdog=%d, last_stage=%s)\n",
+         ROMAN_VERSION, watchdog_caused_reboot() ? 1 : 0,
+         diag_stage_name(diag_boot_stage()));
   printf("roman: stack %u bytes in SRAM\n", (unsigned)stack_total());
 
   // setup USB network

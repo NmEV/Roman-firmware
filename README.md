@@ -146,7 +146,7 @@ and `POST /debug` falls through to 404.
 
 | Body | Result |
 |---|---|
-| *(empty)*, `{}`, `{"action":"snapshot"}` | diagnostics snapshot (system, network, request counters, storage, stack headroom, Roman block) |
+| *(empty)*, `{}`, `{"action":"snapshot"}` | diagnostics snapshot (firmware version, system, network, request counters, storage, stack headroom, Roman block) |
 | `{"action":"clear"}` | erases the record: `writen` returns to 0 and the board can be provisioned again |
 | `{"action":"reset"}` | reboots the board ~100 ms after the reply has been acknowledged |
 | anything else | 400 |
@@ -277,6 +277,15 @@ cmake --build build
 CI (`.github/workflows/main.yml`) builds the same way on Ubuntu and publishes
 `roman.uf2` / `roman.elf` / `roman.bin` as the `roman-firmware` artifact.
 
+**The firmware version lives in exactly one place**: `set(ROMAN_VERSION ...)` at
+the top of `CMakeLists.txt`. It is handed to the SDK's
+`pico_set_program_version()`, which defines `PICO_PROGRAM_VERSION_STRING` for the
+code (`version.h` forwards it as `ROMAN_VERSION`, and fails the build if a build
+system forgot it) and records the same string as binary info, so `picotool` shows
+it too. `GET /info`, `GET /`, `POST /debug` and the boot log all report it.
+**Bump `ROMAN_VERSION` with every firmware change**, so a flashed board can always
+be identified.
+
 UART stdio is enabled, USB stdio is not; sending `s` over UART shuts down
 cleanly.
 
@@ -302,6 +311,23 @@ which is what `stack.free_min` is computed from:
 
 ```sh
 cd tools && gcc -std=c11 -Wall -Wextra -I.. stack_test.c ../stack.c -o stack_test && ./stack_test
+```
+
+`tools/verify_signature.py` is the end to end signature check: it asks the board
+for a signature, verifies it against the stored `ed25519_pk` and prints the stack
+headroom and the request counters in the same run. It implements Ed25519 itself
+(RFC 8032, checked against the RFC test vectors before it judges anything) and
+needs only the standard library - no openssl, no `cryptography`, no `pynacl`:
+
+```sh
+python tools/verify_signature.py --host 192.168.7.1
+# verifier    : RFC 8032 test vectors pass
+# host        : 192.168.7.1 (firmware 0.2, device_id dev-01)
+# message     : b'probe:debug-tool:0:dev-01'
+# signature   : VALID
+# tamper check: rejected
+# stack       : used_max 5056 / total 16384, free_min 11328
+# counters    : sign_ok 1, sign_bad 0, reset_by_watchdog False, last_stage none
 ```
 
 ## Stack budget
@@ -372,14 +398,22 @@ curl -X POST http://192.168.7.1/write \
 curl -X POST http://192.168.7.1/sign -d '{"challenge":"c","context":"x","timestamp":"1"}'
                                                     # 200 + signature
 # Check that signature locally with your own pk: this is what proves the board
-# stored a key pair that matches the pk you sent (the board itself does not):
+# stored a key pair that matches the pk you sent (the board itself does not).
+# tools/verify_signature.py does that and reports the stack headroom too:
+python tools/verify_signature.py --host 192.168.7.1
+#   verifier    : RFC 8032 test vectors pass
+#   signature   : VALID
+#   stack       : used_max 5056 / total 16384, free_min 11328
+# or by hand, if you have openssl:
 #   echo -n "c:x:1:dev-01" > msg.bin
 #   echo "<signature>" | base64 -d > sig.bin
 #   openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in msg.bin -sigfile sig.bin
 curl -X POST http://192.168.7.1/debug -d '{"action":"snapshot"}'
+#   (POST only: GET /debug is a 404 by design, like GET /write)
 #   stack.total     16384
-#   stack.used_max  ~4600 after the /sign above (the deep chain leaves a mark)
-#   stack.free_min  > 10000  <- the headroom, see Stack budget
+#   stack.used_max  5056 after the /sign above (the deep chain leaves a mark);
+#                   it was 3480 before, i.e. the signing chain is the deepest
+#   stack.free_min  11328  <- the headroom, see Stack budget
 # /sign must not kill the connection: repeat it and watch reset_by_watchdog
 for i in 1 2 3 4 5; do
   curl -s -X POST http://192.168.7.1/sign \

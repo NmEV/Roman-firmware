@@ -23,6 +23,7 @@
 #include "stack.h"
 #include "storage.h"
 #include "tweetnacl.h"
+#include "version.h"
 
 #include "hardware/watchdog.h"
 #include "pico/version.h"
@@ -494,9 +495,9 @@ static void handle_info(struct tcp_pcb *pcb, http_state_t *st) {
 
     static char info_buf[320];
     snprintf(info_buf, sizeof(info_buf),
-             "{\"device\":\"pico2\",\"firmware\":\"roman\",\"version\":\"0.1\","
+             "{\"device\":\"pico2\",\"firmware\":\"roman\",\"version\":\"%s\","
              "\"engine\":\"C/tweetnacl\",\"id\":%s,\"storage\":\"%s\"}",
-             id_json, storage_state_name());
+             ROMAN_VERSION, id_json, storage_state_name());
     http_send_response(pcb, st, 200, info_buf);
 }
 
@@ -583,7 +584,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
 
     int n = snprintf(debug_json, sizeof(debug_json),
                      "{\"status\":\"ok\",\"debug\":{"
-                     "\"uptime_ms\":%u,\"sdk\":\"%s\",\"cpu_mhz\":%u,\"unique_id\":\"%s\","
+                     "\"uptime_ms\":%u,\"firmware\":\"%s\",\"sdk\":\"%s\","
+                     "\"cpu_mhz\":%u,\"unique_id\":\"%s\","
                      "\"reset_by_watchdog\":%s,"
                      "\"stack\":{\"used_now\":%u,\"total\":%u,\"used_max\":%u,\"free_min\":%u},"
                      "\"net\":{\"ip\":\"%s\",\"mac\":\"%s\",\"link_up\":%s},"
@@ -596,6 +598,7 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      "\"last_stage\":\"%s\",\"reset_by_watchdog\":%s}"
                      "}}",
                      (unsigned)to_ms_since_boot(get_absolute_time()),
+                     ROMAN_VERSION,
                      PICO_SDK_VERSION_STRING,
                      (unsigned)(clock_get_hz(clk_sys) / 1000000u),
                      unique_id,
@@ -722,8 +725,8 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
     if (strcmp(method, "GET") == 0) {
         if (strcmp(path, "/") == 0) {
             http_send_response(pcb, st, 200,
-                "{\"device\":\"pico2\",\"firmware\":\"roman\",\"ip\":\"192.168.7.1\","
-                "\"status\":\"running\",\"endpoints\":"
+                "{\"device\":\"pico2\",\"firmware\":\"roman\",\"version\":\"" ROMAN_VERSION "\","
+                "\"ip\":\"192.168.7.1\",\"status\":\"running\",\"endpoints\":"
                 "[\"/health\",\"/sign\",\"/info\",\"/write\",\"/clear\",\"/debug\"]}");
         } else if (strcmp(path, "/health") == 0) {
             http_send_response(pcb, st, 200, "{\"status\":\"ok\"}");
@@ -898,9 +901,10 @@ bool http_server_init(void) {
     if (storage_writen()) {
         printf("http: writen=1, POST /write will answer 403\n");
     }
-    // Boot diagnostics: the two numbers that decide whether the deep crypto
-    // paths have room, and which entropy path is in use.
-    printf("http: stack %u bytes (used_max %u, free_min %u), sdk %s, reset_by_watchdog=%d\n",
+    // Boot diagnostics: the numbers that decide whether the deep crypto paths
+    // have room, and which entropy path is in use.
+    printf("http: roman %s on stack %u bytes (used_max %u, free_min %u), sdk %s, reset_by_watchdog=%d\n",
+           ROMAN_VERSION,
            (unsigned)stack_total(), (unsigned)stack_used_max(), (unsigned)stack_free_min(),
            PICO_SDK_VERSION_STRING,
            watchdog_caused_reboot() ? 1 : 0);
