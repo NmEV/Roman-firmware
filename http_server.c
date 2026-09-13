@@ -42,8 +42,9 @@ extern uint32_t __StackBottom;
 #define HTTP_MAX_CONN 3
 #define HTTP_BUF_SIZE 2048
 
-// POST /write carries two base64 keys and a device id: ~200 bytes in practice.
-#define HTTP_WRITE_BODY_LIMIT 1024
+// POST /write carries two base64 keys and a device id, POST /clear one key:
+// ~200 bytes in practice.
+#define HTTP_FORM_BODY_LIMIT 1024
 #if DEBUG_AVAILABLE
 #define HTTP_DEBUG_BODY_LIMIT 256
 #endif
@@ -83,6 +84,8 @@ typedef struct {
     uint32_t sign_bad;   // POST /sign -> 400/503
     uint32_t write_ok;   // POST /write -> 200 (provisioned)
     uint32_t write_bad;  // POST /write -> 400/403
+    uint32_t clear_ok;   // POST /clear -> 200 (erased, or nothing stored)
+    uint32_t clear_bad;  // POST /clear -> 400/403
     uint32_t not_found;  // any request -> 404
     uint32_t too_large;  // any request -> 413
     uint32_t errors;     // 500 responses and tcp_err callbacks
@@ -343,7 +346,7 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
         http_send_response(pcb, st, 400, "{\"error\":\"Empty request body\"}");
         return;
     }
-    if (st->content_length > HTTP_WRITE_BODY_LIMIT) {
+    if (st->content_length > HTTP_FORM_BODY_LIMIT) {
         WEB_STAT(too_large);
         http_send_response(pcb, st, 413, "{\"error\":\"request too large\"}");
         return;
@@ -371,11 +374,26 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
     // keystore_provision() checks the stored flag before it parses anything, so
     // an already provisioned board never reaches the flash.
     switch (keystore_provision(pk_b64, sk_b64, device_id)) {
-        case KEYSTORE_OK:
+        case KEYSTORE_OK: {
             WEB_STAT(write_ok);
             printf("http: provisioned device_id=%s\n", device_id);
-            http_send_response(pcb, st, 200, "{\"status\":\"ok\",\"writen\":true}");
+            // Hand the freshly generated X25519 public key back to the client: it
+            // is the key the payload is boxed to. The secret half stays on the
+            // board (stored in plaintext next to the ciphertext, by design); the
+            // client proves possession of its Ed25519 key to erase the record.
+            static uint8_t x_pk[STORAGE_KEY_LEN];
+            static char x_pk_b64[64];
+            static char ok_body[160];
+            const char *ok = "{\"status\":\"ok\",\"writen\":true}";
+            if (storage_x25519_pk(x_pk)) {
+                base64_encode(x_pk, STORAGE_KEY_LEN, x_pk_b64);
+                snprintf(ok_body, sizeof(ok_body),
+                         "{\"status\":\"ok\",\"writen\":true,\"x25519_pk\":\"%s\"}", x_pk_b64);
+                ok = ok_body;
+            }
+            http_send_response(pcb, st, 200, ok);
             break;
+        }
         case KEYSTORE_ERR_ALREADY:
             WEB_STAT(write_bad);
             http_send_response(pcb, st, 403,
@@ -394,6 +412,58 @@ static void handle_write_post(struct tcp_pcb *pcb, http_state_t *st, const char 
             WEB_STAT(write_bad);
             http_send_response(pcb, st, 400,
                                "{\"error\":\"invalid pk/sk/device_id\"}");
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /clear - erase the record for a caller that holds the Ed25519 secret
+// ---------------------------------------------------------------------------
+
+static void handle_clear_post(struct tcp_pcb *pcb, http_state_t *st, const char *body) {
+    if (body == NULL || *body == '\0') {
+        WEB_STAT(clear_bad);
+        http_send_response(pcb, st, 400, "{\"error\":\"Empty request body\"}");
+        return;
+    }
+    if (st->content_length > HTTP_FORM_BODY_LIMIT) {
+        WEB_STAT(too_large);
+        http_send_response(pcb, st, 413, "{\"error\":\"request too large\"}");
+        return;
+    }
+
+    // "ed25519_sk" is the documented field name; "sk" is accepted as a shorthand.
+    static char key_b64[128];
+    if (json_get_string(body, "ed25519_sk", key_b64, sizeof(key_b64)) != 0 &&
+        json_get_string(body, "sk", key_b64, sizeof(key_b64)) != 0) {
+        WEB_STAT(clear_bad);
+        http_send_response(pcb, st, 400, "{\"error\":\"Missing field: ed25519_sk\"}");
+        return;
+    }
+
+    printf("http: /clear received\n");
+    switch (keystore_clear(key_b64)) {
+        case KEYSTORE_CLEAR_OK:
+            WEB_STAT(clear_ok);
+            http_send_response(pcb, st, 200, "{\"status\":\"ok\",\"writen\":false}");
+            break;
+        case KEYSTORE_CLEAR_EMPTY:
+            WEB_STAT(clear_ok);
+            http_send_response(pcb, st, 200,
+                               "{\"status\":\"ok\",\"writen\":false,\"note\":\"nothing stored\"}");
+            break;
+        case KEYSTORE_CLEAR_ERR_ARG:
+            WEB_STAT(clear_bad);
+            http_send_response(pcb, st, 400, "{\"error\":\"invalid ed25519_sk\"}");
+            break;
+        case KEYSTORE_CLEAR_ERR_DENIED:
+            WEB_STAT(clear_bad);
+            printf("http: /clear rejected (key does not match)\n");
+            http_send_response(pcb, st, 403, "{\"error\":\"ed25519_sk does not match\"}");
+            break;
+        case KEYSTORE_CLEAR_ERR_FLASH:
+            WEB_STAT(errors);
+            http_send_response(pcb, st, 500, "{\"error\":\"flash erase failed\"}");
             break;
     }
 }
@@ -502,8 +572,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      "\"stack\":{\"used_now\":%u,\"total\":%u},"
                      "\"net\":{\"ip\":\"%s\",\"mac\":\"%s\",\"link_up\":%s},"
                      "\"web\":{\"conns\":%u,\"conns_max\":%d,\"requests\":%u,\"sign_ok\":%u,"
-                     "\"sign_bad\":%u,\"write_ok\":%u,\"write_bad\":%u,\"not_found\":%u,"
-                     "\"too_large\":%u,\"errors\":%u},"
+                     "\"sign_bad\":%u,\"write_ok\":%u,\"write_bad\":%u,\"clear_ok\":%u,"
+                     "\"clear_bad\":%u,\"not_found\":%u,\"too_large\":%u,\"errors\":%u},"
                      "\"storage\":{\"writen\":%s,\"available\":%s,\"selftest\":\"%s\","
                      "\"plaintext_len\":%u,\"max_payload\":%d,\"flash_offset\":%u},"
                      "\"roman\":{\"device_id\":%s,\"ed25519_pk\":\"%s\",\"x25519_pk\":\"%s\","
@@ -520,7 +590,8 @@ static void debug_snapshot(struct tcp_pcb *pcb, http_state_t *st) {
                      conns, HTTP_MAX_CONN,
                      (unsigned)http_stats.requests, (unsigned)http_stats.sign_ok,
                      (unsigned)http_stats.sign_bad, (unsigned)http_stats.write_ok,
-                     (unsigned)http_stats.write_bad, (unsigned)http_stats.not_found,
+                     (unsigned)http_stats.write_bad, (unsigned)http_stats.clear_ok,
+                     (unsigned)http_stats.clear_bad, (unsigned)http_stats.not_found,
                      (unsigned)http_stats.too_large, (unsigned)http_stats.errors,
                      storage_writen() ? "true" : "false",
                      available ? "true" : "false", selftest, (unsigned)plaintext_len,
@@ -635,7 +706,7 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
             http_send_response(pcb, st, 200,
                 "{\"device\":\"pico2\",\"firmware\":\"roman\",\"ip\":\"192.168.7.1\","
                 "\"status\":\"running\",\"endpoints\":"
-                "[\"/health\",\"/sign\",\"/info\",\"/write\",\"/debug\"]}");
+                "[\"/health\",\"/sign\",\"/info\",\"/write\",\"/clear\",\"/debug\"]}");
         } else if (strcmp(path, "/health") == 0) {
             http_send_response(pcb, st, 200, "{\"status\":\"ok\"}");
         } else if (strcmp(path, "/info") == 0) {
@@ -655,6 +726,8 @@ static void http_process_request(struct tcp_pcb *pcb, http_state_t *st) {
             handle_sign_post(pcb, st, body);
         } else if (strcmp(path, "/write") == 0) {
             handle_write_post(pcb, st, body);
+        } else if (strcmp(path, "/clear") == 0) {
+            handle_clear_post(pcb, st, body);
 #if DEBUG_AVAILABLE
         } else if (strcmp(path, "/debug") == 0) {
             handle_debug(pcb, st, body);

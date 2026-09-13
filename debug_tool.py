@@ -14,6 +14,7 @@ Endpoints used (see README.md / web_server.h):
     POST /debug  {"action":"reset"}      reboot the board (~100 ms later)
     GET  /info                           device id + provisioning state
     POST /write  {"pk":...,"sk":...,"device_id":...}   one shot provisioning
+    POST /clear  {"ed25519_sk":...}  erase, proving the provisioning secret
     POST /sign   {"challenge":...,"context":...,"timestamp":...}   test signing
 
 Nothing runs on the network in the Tk thread: every request is executed by a
@@ -133,6 +134,12 @@ class UsbNetClient:
                             json.dumps({"pk": pk_b64, "sk": sk_b64,
                                         "device_id": device_id}))
 
+    def clear_with_key(self, ed25519_sk_b64):
+        # POST /clear wants the Ed25519 secret key that was provisioned, not the
+        # X25519 one (the board never hands that out).
+        return self.request("POST", "/clear",
+                           json.dumps({"ed25519_sk": ed25519_sk_b64}))
+
     def sign(self, challenge, context, timestamp):
         return self.request("POST", "/sign",
                             json.dumps({"challenge": challenge, "context": context,
@@ -212,6 +219,8 @@ SNAPSHOT_LAYOUT = (
     ("请求", "web.sign_bad", str, ("web", "sign_bad")),
     ("请求", "web.write_ok", str, ("web", "write_ok")),
     ("请求", "web.write_bad", str, ("web", "write_bad")),
+    ("请求", "web.clear_ok", str, ("web", "clear_ok")),
+    ("请求", "web.clear_bad", str, ("web", "clear_bad")),
     ("请求", "web.not_found", str, ("web", "not_found")),
     ("请求", "web.too_large", str, ("web", "too_large")),
     ("请求", "web.errors", str, ("web", "errors")),
@@ -239,7 +248,8 @@ def zh_label(label):
 # numeric fields for which a delta against the previous snapshot is useful
 DELTA_KEYS = {
     "web.requests", "web.sign_ok", "web.sign_bad", "web.write_ok",
-    "web.write_bad", "web.not_found", "web.too_large", "web.errors",
+    "web.write_bad", "web.clear_ok", "web.clear_bad", "web.not_found",
+    "web.too_large", "web.errors",
 }
 
 # JSON null also means "no value yet"; these fields still get a row.
@@ -648,13 +658,21 @@ class DebugApp:
         self._submit("sign", lambda: self.client.sign("probe", "debug-tool", "0"))
 
     def _on_clear(self):
+        # /clear authenticates with the Ed25519 secret key that was provisioned,
+        # which the form above already holds - so no extra credential to type in.
+        key = self.sk_var.get().strip()
+        if not key:
+            messagebox.showwarning("缺少擦除凭据",
+                                   "请先在 pk/sk 表单里填入配网时用的 Ed25519 私钥（sk），\n"
+                                   "POST /clear 需要它来授权擦除。", parent=self.root)
+            return
         if not messagebox.askyesno("清除存储",
                                    "确定要清除 %s 上已存储的密钥与 device_id 吗？\n\n"
-                                   "清除后 writen 回到 0，可以重新配网；"
-                                   "这是配网出错后唯一的恢复途径。" % self.client.base,
+                                   "将用表单里的 Ed25519 私钥授权（POST /clear）；"
+                                   "清除后 writen 回到 0，可以重新配网。" % self.client.base,
                                    parent=self.root):
             return
-        self._submit("clear", lambda: self.client.debug_action("clear"))
+        self._submit("clear", lambda: self.client.clear_with_key(key))
 
     def _on_reset(self):
         if not messagebox.askyesno("重启设备",

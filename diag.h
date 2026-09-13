@@ -23,6 +23,8 @@ typedef enum {
     DIAG_STAGE_ERASE,        // erasing the flash sector
     DIAG_STAGE_PROGRAM,      // programming the record
     DIAG_STAGE_DONE,         // committed, writen == 1
+    DIAG_STAGE_CLEAR,        // erasing the record for POST /clear
+    DIAG_STAGE_MAX = DIAG_STAGE_CLEAR, // keep this last: bounds the range check
 } diag_stage_t;
 
 // Records the stage currently being executed.

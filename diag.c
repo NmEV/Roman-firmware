@@ -21,7 +21,7 @@ diag_stage_t diag_previous_stage(void) {
         return DIAG_STAGE_IDLE;
     }
     uint32_t value = watchdog_hw->scratch[0] ^ DIAG_MARKER;
-    if (value > (uint32_t)DIAG_STAGE_DONE) {
+    if (value > (uint32_t)DIAG_STAGE_MAX) {
         return DIAG_STAGE_IDLE;
     }
     return (diag_stage_t)value;
@@ -47,6 +47,7 @@ const char *diag_stage_name(diag_stage_t stage) {
         case DIAG_STAGE_ERASE:      return "erase";
         case DIAG_STAGE_PROGRAM:    return "program";
         case DIAG_STAGE_DONE:       return "done";
+        case DIAG_STAGE_CLEAR:      return "clear";
         case DIAG_STAGE_IDLE:
         default:                    return "none";
     }

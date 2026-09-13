@@ -42,7 +42,23 @@ bool keystore_signing_key(uint8_t sk64[64]);
 bool keystore_device_id(char *out, size_t cap);
 bool keystore_public_key(uint8_t pk[32]);
 
-// Drops the RAM cache (after provisioning, or after /debug cleared the slot).
+typedef enum {
+    KEYSTORE_CLEAR_OK = 0,     // erased: the board can be provisioned again
+    KEYSTORE_CLEAR_EMPTY,      // nothing was stored, nothing to do (idempotent)
+    KEYSTORE_CLEAR_ERR_ARG,    // missing or malformed key      -> 400
+    KEYSTORE_CLEAR_ERR_DENIED, // not the provisioned key       -> 403
+    KEYSTORE_CLEAR_ERR_FLASH,  // erase failed                  -> 500
+} keystore_clear_status_t;
+
+// Erases the stored record so the board can be provisioned again, but only for a
+// caller that proves it holds the provisioning secret: ed25519_sk_b64 must be
+// the Ed25519 secret key that POST /write installed (32 byte seed, or the full
+// 64 byte seed||public key, base64). That key is the client's own - the board
+// only saw it once, at provisioning time - so this does not expose the X25519
+// secret the payload is boxed with.
+keystore_clear_status_t keystore_clear(const char *ed25519_sk_b64);
+
+// Drops the RAM cache (after provisioning, or after a clear).
 void keystore_invalidate(void);
 
 #endif // ROMAN_KEYSTORE_H

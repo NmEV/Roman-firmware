@@ -21,7 +21,8 @@ A small HTTP server runs on port 80 (IP `192.168.7.1`, also `roman.local`).
 | GET | `/info` | device / firmware / version / engine / stored device id / storage state |
 | GET | `/sign` | describes the `POST /sign` fields |
 | POST | `/sign` | Ed25519 signature made with the stored key |
-| POST | `/write` | **one-shot provisioning** (403 once `writen` is set) |
+| POST | `/write` | **one-shot provisioning** (403 once `writen` is set); the reply carries the generated X25519 public key |
+| POST | `/clear` | erases the record for a caller that presents the provisioning Ed25519 secret key |
 | POST | `/debug` | diagnostics + maintenance (compile-time gated, see below) |
 | OPTIONS | * | CORS preflight |
 
@@ -46,6 +47,18 @@ What happens on success:
    (`crypto_box`, X25519 + XSalsa20-Poly1305) and the **ciphertext** is written;
 4. `writen` becomes true and every later `POST /write` answers **403**.
 
+The reply carries the public half of the key pair that was just generated, so the
+client learns which key the payload is boxed to:
+
+```json
+{"status":"ok","writen":true,"x25519_pk":"<base64 32B>"}
+```
+
+The X25519 **secret** key never leaves the board - it is stored next to the
+ciphertext (see the security model). Erasing the record does not use it either:
+`POST /clear` authenticates with the Ed25519 secret key **you** provisioned with,
+which the board only ever saw once.
+
 | Situation | Answer |
 |---|---|
 | already provisioned | `403 {"error":"already provisioned","writen":true}` |
@@ -63,6 +76,37 @@ provisioning: take one signature from `POST /sign` and check it with your own
 `pk`, exactly as in the [acceptance test](#acceptance-test-on-hardware). If it
 fails, `POST /debug {"action":"clear"}` puts the board back into the empty state
 and you can provision again - no reflashing needed.
+
+### POST /clear
+
+Erases the stored record so the board can be provisioned again. It only serves a
+caller that can present the Ed25519 secret key installed by `POST /write`:
+
+```sh
+curl -X POST http://192.168.7.1/clear -d '{"ed25519_sk":"<base64 32B or 64B>"}'
+```
+
+* `ed25519_sk` is the value that was sent as `sk` to `/write` (the 32 byte seed, or
+  the full 64 byte seed plus public key). `sk` is accepted as a shorthand name.
+* It is compared in constant time against the decrypted stored key, so it proves
+  possession of the provisioning secret - it is not a device-wide password.
+* The X25519 secret key is deliberately not accepted here: the board never gave it
+  out, and it is not what authorises erasure.
+
+| Situation | Answer |
+|---|---|
+| key matches | `200 {"status":"ok","writen":false}` - the board is empty and can be provisioned again |
+| nothing stored | `200 {"status":"ok","writen":false,"note":"nothing stored"}` (idempotent) |
+| missing key | `400 {"error":"Missing field: ed25519_sk"}` |
+| malformed key | `400 {"error":"invalid ed25519_sk"}` |
+| wrong key | `403 {"error":"ed25519_sk does not match"}` |
+| body larger than 1024 bytes | `413` |
+| flash erase failed | `500 {"error":"flash erase failed"}` |
+
+If the stored record is corrupt (it no longer decrypts), no key can be checked
+against it and `/clear` answers 403; recovery then needs a build with
+`DEBUG_AVAILABLE 1` and `POST /debug {"action":"clear"}`, which erases without a
+credential and is meant for the bench only.
 
 ### POST /sign
 
@@ -292,7 +336,15 @@ curl -X POST http://192.168.7.1/sign -d '{"challenge":"c","context":"x","timesta
 # power cycle the board, then:
 curl http://192.168.7.1/info                        # still provisioned (persistence)
 curl -X POST http://192.168.7.1/debug               # snapshot, roman.writen = true
-curl -X POST http://192.168.7.1/debug -d '{"action":"clear"}'   # recovery path
+# POST /clear authenticates with the Ed25519 secret key you provisioned with:
+curl -X POST http://192.168.7.1/clear -d '{"ed25519_sk":"<b64>"}'        # 200, writen false
+curl -X POST http://192.168.7.1/clear -d '{"ed25519_sk":"<wrong>"}'      # 403
+curl -X POST http://192.168.7.1/clear -d '{"ed25519_sk":"not base64!"}'  # 400
+curl http://192.168.7.1/info                        # storage empty again
+curl -X POST http://192.168.7.1/write \
+     -d '{"pk":"<b64>","sk":"<b64>","device_id":"dev-09"}'      # 200, provisioned again
+# bench only (DEBUG_AVAILABLE 1), erases without a credential:
+curl -X POST http://192.168.7.1/debug -d '{"action":"clear"}'
 ```
 
 ## Credits

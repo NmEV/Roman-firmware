@@ -124,6 +124,48 @@ keystore_status_t keystore_provision(const char *pk_b64, const char *sk_b64,
     return KEYSTORE_OK;
 }
 
+keystore_clear_status_t keystore_clear(const char *ed25519_sk_b64) {
+    // Nothing stored: the goal state already holds, so this is not an error (a
+    // client may always call /clear first).
+    if (!storage_writen()) {
+        return KEYSTORE_CLEAR_EMPTY;
+    }
+    if (ed25519_sk_b64 == NULL) {
+        return KEYSTORE_CLEAR_ERR_ARG;
+    }
+
+    diag_stage(DIAG_STAGE_CLEAR);
+    printf("keystore: /clear, checking the key\n");
+
+    // The stored record has to decrypt before anything can be compared with it.
+    if (!keystore_load()) {
+        return KEYSTORE_CLEAR_ERR_DENIED;
+    }
+
+    static uint8_t given[64];
+    int len = record_b64_decode(ed25519_sk_b64, given, sizeof(given));
+    if (len != 32 && len != 64) {
+        return KEYSTORE_CLEAR_ERR_ARG;
+    }
+
+    // Constant time comparison of the seed half, plus the public half when the
+    // caller sent the full 64 byte form.
+    if (crypto_verify_32(given, cached_sk) != 0) {
+        return KEYSTORE_CLEAR_ERR_DENIED;
+    }
+    if (len == 64 && crypto_verify_32(given + 32, cached_sk + 32) != 0) {
+        return KEYSTORE_CLEAR_ERR_DENIED;
+    }
+
+    if (!storage_clear()) {
+        printf("keystore: /clear erase failed\n");
+        return KEYSTORE_CLEAR_ERR_FLASH;
+    }
+    keystore_invalidate();
+    printf("keystore: /clear done, writen=0\n");
+    return KEYSTORE_CLEAR_OK;
+}
+
 bool keystore_signing_key(uint8_t sk64[64]) {
     if (sk64 == NULL || !keystore_load()) {
         return false;
