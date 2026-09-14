@@ -7,6 +7,10 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch: # 允许手动触发
 
+# 默认只读；发布 release 的 job 自己声明 contents: write
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -85,5 +89,86 @@ jobs:
           build/*.elf
           build/*.bin
 
-          build/*.bin
+  # 8️⃣ 每次推送到 main/master 后，把同一个 tag（latest）的 release 指向这次构建。
+  # 固定下载地址：<repo>/releases/download/latest/roman.uf2
+  # PR 与 workflow_dispatch 不发布；构建失败时本 job 不会运行。
+  release-latest:
+    name: Publish fixed 'latest' release
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    # 同一个 latest release 不能被两个推送同时改写：排队而不是并发
+    concurrency:
+      group: release-latest
+      cancel-in-progress: false
+    # 移动 tag 与创建 release 都需要写权限；默认只读
+    permissions:
+      contents: write
 
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # 版本号只有一个来源：CMakeLists.txt 的 set(ROMAN_VERSION ...)。发布说明里
+    # 带上它，下载的人和 board 上 /info 报的版本就能对上。找不到就报错退出。
+    - name: Read firmware version
+      id: version
+      shell: bash
+      run: |
+        version=$(sed -n 's/^set(ROMAN_VERSION[[:space:]]*\([^)]*\)).*/\1/p' CMakeLists.txt)
+        test -n "$version" || { echo "::error::ROMAN_VERSION not found in CMakeLists.txt"; exit 1; }
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "firmware version: $version"
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release
+
+    - name: Flatten artifacts
+      shell: bash
+      run: |
+        mkdir -p release-files
+        find release -type f -exec cp {} release-files/ \;
+        ls -l release-files
+
+    - name: Generate checksums
+      shell: bash
+      run: |
+        cd release-files
+        sha256sum * > SHA256SUMS.txt
+        cat SHA256SUMS.txt
+
+    - name: Move fixed 'latest' tag
+      shell: bash
+      run: |
+        git tag -f latest "$GITHUB_SHA"
+        git push --force origin refs/tags/latest
+
+    - name: Publish fixed 'latest' release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ steps.version.outputs.version }}
+      shell: bash
+      run: |
+        # 已有同名 Release 时先删除（tag 上一步已经移到新提交，删除不会丢 tag）
+        gh release delete latest --yes >/dev/null 2>&1 || true
+        # 说明写进文件再交给 gh，避免在命令行里拼换行
+        cat > notes.md <<EOF
+        自动构建产物，随 main 分支每次推送更新。
+
+        - firmware version: ${VERSION}
+        - commit: ${GITHUB_SHA}
+        - built from pico-sdk 2.2.0 + arm-gnu-toolchain 13.2.rel1, PICO_BOARD=pico2
+
+        固定下载地址：
+        - https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/roman.uf2
+        - https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/SHA256SUMS.txt
+
+        刷写前请核对 SHA256SUMS.txt。
+        EOF
+        gh release create latest release-files/* \
+          --title "Roman ${VERSION} firmware (${GITHUB_SHA:0:7})" \
+          --notes-file notes.md

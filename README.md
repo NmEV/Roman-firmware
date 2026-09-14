@@ -277,6 +277,18 @@ cmake --build build
 CI (`.github/workflows/main.yml`) builds the same way on Ubuntu and publishes
 `roman.uf2` / `roman.elf` / `roman.bin` as the `roman-firmware` artifact.
 
+Every push to `main` also republishes a fixed **`latest` release**: the tag is
+force-moved to the pushed commit and the release is recreated from the fresh
+artifact, so the download URL never changes:
+
+```sh
+https://github.com/<owner>/<repo>/releases/download/latest/roman.uf2
+https://github.com/<owner>/<repo>/releases/download/latest/SHA256SUMS.txt
+```
+
+Each push overwrites those assets - the release notes carry the firmware
+version and the commit - so older builds remain only as workflow artifacts.
+
 **The firmware version lives in exactly one place**: `set(ROMAN_VERSION ...)` at
 the top of `CMakeLists.txt`. It is handed to the SDK's
 `pico_set_program_version()`, which defines `PICO_PROGRAM_VERSION_STRING` for the
