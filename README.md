@@ -449,7 +449,5 @@ curl -X POST http://192.168.7.1/debug -d '{"action":"clear"}'
 ## Credits
 
 USB Ethernet, lwIP bring-up, the DHCP server and the HTTP connection machinery
-come from [USBNet](https://github.com/NellowTC/USBNet) by Matthew Bennett (MIT),
-via the `build-pico2-http-firmware` sign firmware; the encrypted flash store is
-derived from the `firmware-with-storage` firmware. Cryptography is
-[TweetNaCl](https://tweetnacl.cr.yp.to/) (public domain). See `LICENSE`.
+come from [USBNet](https://github.com/mattmyne/usbnet) by Matthew Bennett (MIT).
+Cryptography is[TweetNaCl](https://tweetnacl.cr.yp.to/) (public domain). See `LICENSE`.
